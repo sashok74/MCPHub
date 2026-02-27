@@ -1,0 +1,34 @@
+# Build output
+Win64x/
+Win32/
+
+# C++Builder local/temp files
+*.local
+__history/
+__recovery/
+*.identcache
+*.projdata
+*.tvsconfig
+*.dsk
+*.stat
+
+# Build logs & error reports
+doc/cpp_build/logs/
+doc/cpp_build/errors/
+
+# Directory junctions (symlinks to sibling projects)
+external
+sqlite3
+
+# Runtime config (machine-specific)
+mcphub.config.json
+
+# SQLite databases (runtime data)
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# OS
+Thumbs.db
+Desktop.ini

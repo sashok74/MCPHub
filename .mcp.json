@@ -1,0 +1,24 @@
+  {
+    "mcpServers": {
+      "dbmcp": {
+        "type": "http",
+        "url": "http://localhost:8765/mcp"
+      },
+      "dbmcp_target": {
+        "type": "http",
+        "url": "http://localhost:8764/mcp"
+      },
+      "project-memory": {
+        "type": "http",
+        "url": "http://localhost:8768/mcp"
+      },
+      "merp-helper": {
+        "type": "http",
+        "url": "http://localhost:8090/mcp"
+      },
+      "merp-helper-prd": {
+        "type": "http",
+        "url": "http://localhost:8091/mcp"
+      }
+    }
+  }
