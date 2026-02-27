@@ -187,6 +187,12 @@ The code generator uses a Mustache-like template engine. Templates use `{{VARIAB
 | `{{NULL_VALUE}}` | Null sentinel (`GLOBAL_INVALID_ID`) |
 | `{{DISPLAY_EXPR}}` | *(OUT only)* Display expression |
 | `{{FROM_ROW_LINE}}` | *(OUT only)* C++ row extraction code |
+| `{{IS_STRING}}` | Flag: string type (nvarchar, varchar, text) |
+| `{{IS_NULLABLE}}` | Flag: column allows NULL |
+| `{{MAX_LENGTH}}` | Max length for strings (0 if N/A) |
+| `{{IS_KEY_FIELD}}` | Flag: primary key column |
+| `{{FIELD_TYPE}}` | SQL type: nvarchar, int, datetime, etc. |
+| `{{PRECISION}}` | Numeric precision (0 if N/A) |
 
 #### Key Field Variables
 

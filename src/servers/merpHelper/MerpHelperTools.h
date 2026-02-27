@@ -1055,6 +1055,7 @@ inline ToolList GetMerpHelperTools(
 		"{{QUERY_NAME}}, {{#IN_PARAMS}}...{{/IN_PARAMS}}, {{#OUT_PARAMS}}...{{/OUT_PARAMS}}, "
 		"{{CPP_TYPE}}, {{MEMBER_NAME}}, {{DB_NAME}}, {{DEFAULT_VALUE}}, "
 		"{{HAS_NULL_VALUE}}, {{NULL_VALUE}}, {{DISPLAY_EXPR}}, {{FROM_ROW_LINE}}, "
+		"{{IS_STRING}}, {{IS_NULLABLE}}, {{MAX_LENGTH}}, {{IS_KEY_FIELD}}, {{FIELD_TYPE}}, {{PRECISION}}, "
 		"{{IN_KEY_FIELD_NAME}}, {{OUT_KEY_FIELD_NAME}}, {{HAS_PID}}, {{HAS_TID}}. "
 		"Dataset variables: {{#HAS_DS}}, {{DS_NAME}}, "
 		"{{DS_QUERY_I}}, {{DS_QUERY_I_PASCAL}}, {{DS_QUERY_U}}, {{DS_QUERY_U_PASCAL}}, "
@@ -1534,7 +1535,13 @@ inline ToolList GetMerpHelperTools(
 				{"HAS_NULL_VALUE", "Flag: nullable parameter"},
 				{"NULL_VALUE",     "Null sentinel: GLOBAL_INVALID_ID"},
 				{"DISPLAY_EXPR",   "(OUT only) Display expression"},
-				{"FROM_ROW_LINE",  "(OUT only) row.fill() code line"}
+				{"FROM_ROW_LINE",  "(OUT only) row.fill() code line"},
+				{"IS_STRING",      "Flag: string type (nvarchar, varchar, text, ntext)"},
+				{"IS_NULLABLE",    "Flag: column allows NULL"},
+				{"MAX_LENGTH",     "Max length for string columns (0 if N/A)"},
+				{"IS_KEY_FIELD",   "Flag: primary key column"},
+				{"FIELD_TYPE",     "SQL type name: nvarchar, int, datetime, etc."},
+				{"PRECISION",      "Numeric precision (0 if N/A)"}
 			};
 			result["key_fields"] = {
 				{"IN_KEY_FIELD_NAME / OUT_KEY_FIELD_NAME",   "PK member name"},
