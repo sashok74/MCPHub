@@ -8,27 +8,34 @@ MCPHub uses a modular architecture where each MCP server is a **module**. A modu
 - A list of tools (functions callable via JSON-RPC)
 - Cleanup logic
 
-The base class handles everything else: HTTP server, MCP protocol, request routing, logging, activity tracking, thread-safe UI callbacks.
+The base class handles: MCP protocol, request routing, logging, activity tracking, thread-safe UI callbacks. The host (`TfrmMain`) manages the HTTP servers — modules don't deal with HTTP at all.
 
 ## Architecture
 
 ```
-IMcpModule           (interface — identity, config, lifecycle, observability, callbacks)
+IMcpModule           (interface — identity, config, lifecycle, HandleJsonRpc, observability)
     │
-McpModuleBase        (base class — HTTP server, MCP protocol stack, tool registration)
+McpModuleBase        (base class — MCP protocol stack, tool registration, HandleJsonRpc impl)
     │
 YourModule           (your code — config fields, init, tools, cleanup)
+
+Host (TfrmMain)      (owns HTTP: TIdHTTPServer + HttpTransport per module)
 ```
 
 ### What McpModuleBase does for you (DO NOT reimplement):
-- Creates `TIdHTTPServer` on configured port
 - Opens `LocalMcpDb` (SQLite) if `db_path` or `local_db_path` is in config
-- Creates `TMcpServer` + `TMcpHandler` + `HttpTransport`
-- Wires `OnCommandGet` event to transport
-- Registers all tools from `OnRegisterTools()`
+- Creates `TMcpServer` and registers all tools from `OnRegisterTools()`
+- Wires `SetOnToolExecuted` for activity tracking
+- Implements `HandleJsonRpc()` — routes JSON-RPC string through `TMcpServer` and fires log callback
 - Tracks request count, last activity time
 - Fires `LogCallback`, `ActivityCallback`, `StateChangeCallback` via `TThread::Queue`
 - Handles Start/Stop lifecycle with error recovery
+
+### What the host (TfrmMain) does:
+- Creates `TIdHTTPServer` on the module's configured port
+- Creates `HttpTransport` with CORS, wires it to call `module->HandleJsonRpc()`
+- Bridges Indy `OnCommandGet` via `THttpEventBridge`
+- Manages HTTP start/stop around module Start/Stop
 
 ### What you implement (3 methods + config):
 - `GetConfigFields()` — what the UI shows for configuration
@@ -259,7 +266,7 @@ Edit `src/modules/RegisterModules.cpp`:
 #include "RegisterModules.h"
 #include "ProjectMemoryModule.h"
 #include "DbMcpModule.h"
-#include "../servers/your_server/YourModule.h"    // ← add
+#include "YourModule.h"              // ← add (resolved via include path)
 
 void RegisterAllModuleTypes(ModuleRegistry &registry)
 {
@@ -277,7 +284,7 @@ void RegisterAllModuleTypes(ModuleRegistry &registry)
 
 ### Step 6: Add to MCPHub.cbproj
 
-Add two entries to the `<ItemGroup>` section:
+Add your .cpp to the `<ItemGroup>` section:
 
 ```xml
 <!-- Your module .cpp -->
@@ -298,7 +305,7 @@ src\servers\your_server\;
 ### Step 7: Build and test
 
 ```bash
-./doc/cpp_build/build_and_parse.sh ./MCPHub.cbproj
+/build
 ```
 
 After starting in the UI:

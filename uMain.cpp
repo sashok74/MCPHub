@@ -1,10 +1,11 @@
-﻿//---------------------------------------------------------------------------
+//---------------------------------------------------------------------------
 #include <vcl.h>
 #pragma hdrstop
 
 #include "uMain.h"
 #include "RegisterModules.h"
 #include "UcodeUtf8.h"
+#include "TransportTypes.h"
 #include <System.SysUtils.hpp>
 #include <System.JSON.hpp>
 #include <algorithm>
@@ -127,6 +128,7 @@ void __fastcall TfrmMain::FormShow(TObject *Sender)
 
 			int idx = (int)FModules.size();
 			FModules.push_back(std::move(module));
+			FModuleHttp.push_back(ModuleHttpInfo());
 			FModuleLogs.push_back({"", ""});
 			WireModuleCallbacks(idx);
 		}
@@ -143,7 +145,11 @@ void __fastcall TfrmMain::FormShow(TObject *Sender)
 	for (size_t i = 0; i < FModules.size(); i++)
 	{
 		if (i < FConfig.GetModules().size() && FConfig.GetModules()[i].autoStart)
+		{
 			FModules[i]->Start();
+			if (FModules[i]->GetState() == ModuleState::Running)
+				StartModuleHttp((int)i);
+		}
 	}
 
 	if (FModules.size() > 0)
@@ -156,10 +162,13 @@ void __fastcall TfrmMain::FormShow(TObject *Sender)
 void __fastcall TfrmMain::FormClose(TObject *Sender, TCloseAction &Action)
 {
 	// Stop all running modules
-	for (auto& m : FModules)
+	for (size_t i = 0; i < FModules.size(); i++)
 	{
-		if (m->GetState() == ModuleState::Running)
-			m->Stop();
+		if (FModules[i]->GetState() == ModuleState::Running)
+		{
+			StopModuleHttp((int)i);
+			FModules[i]->Stop();
+		}
 	}
 
 	// Save config
@@ -403,6 +412,9 @@ void __fastcall TfrmMain::btnStartClick(TObject *Sender)
 	}
 
 	m->Start();
+	if (m->GetState() == ModuleState::Running)
+		StartModuleHttp(FSelectedIndex);
+
 	UpdateModuleRow(FSelectedIndex);
 	UpdateStatusBar();
 	SelectModule(FSelectedIndex); // refresh button states
@@ -418,6 +430,7 @@ void __fastcall TfrmMain::btnStopClick(TObject *Sender)
 	if (FSelectedIndex < 0 || FSelectedIndex >= (int)FModules.size())
 		return;
 
+	StopModuleHttp(FSelectedIndex);
 	FModules[FSelectedIndex]->Stop();
 	UpdateModuleRow(FSelectedIndex);
 	UpdateStatusBar();
@@ -449,6 +462,8 @@ void __fastcall TfrmMain::btnStartAllClick(TObject *Sender)
 		if (FModules[i]->GetState() != ModuleState::Running)
 		{
 			FModules[i]->Start();
+			if (FModules[i]->GetState() == ModuleState::Running)
+				StartModuleHttp((int)i);
 			UpdateModuleRow((int)i);
 		}
 	}
@@ -463,6 +478,7 @@ void __fastcall TfrmMain::btnStopAllClick(TObject *Sender)
 	{
 		if (FModules[i]->GetState() == ModuleState::Running)
 		{
+			StopModuleHttp((int)i);
 			FModules[i]->Stop();
 			UpdateModuleRow((int)i);
 		}
@@ -490,6 +506,7 @@ void TfrmMain::AddModule(const std::string& typeId)
 
 	int idx = (int)FModules.size();
 	FModules.push_back(std::move(module));
+	FModuleHttp.push_back(ModuleHttpInfo());
 	FModuleLogs.push_back({"", ""});
 	WireModuleCallbacks(idx);
 
@@ -510,9 +527,13 @@ void TfrmMain::RemoveModule(int index)
 
 	// Stop if running
 	if (FModules[index]->GetState() == ModuleState::Running)
+	{
+		StopModuleHttp(index);
 		FModules[index]->Stop();
+	}
 
 	FModules.erase(FModules.begin() + index);
+	FModuleHttp.erase(FModuleHttp.begin() + index);
 	FModuleLogs.erase(FModuleLogs.begin() + index);
 
 	FSelectedIndex = -1;
@@ -568,6 +589,82 @@ void TfrmMain::WireModuleCallbacks(int index)
 			UpdateStatusBar();
 		}
 	});
+}
+
+//---------------------------------------------------------------------------
+// HTTP lifecycle — host owns the HTTP servers
+//---------------------------------------------------------------------------
+void TfrmMain::StartModuleHttp(int index)
+{
+	if (index < 0 || index >= (int)FModuleHttp.size())
+		return;
+
+	auto& info = FModuleHttp[index];
+	auto* m = FModules[index].get();
+
+	int port = m->GetPort();
+	if (port <= 0)
+		return;
+
+	// Create TIdHTTPServer
+	info.HttpServer = new TIdHTTPServer(nullptr);
+	info.HttpServer->DefaultPort = port;
+
+	// Create HttpTransport with CORS
+	Mcp::Transport::TCorsConfig corsConfig;
+	corsConfig.AllowLocalhost = true;
+	info.Transport = std::make_unique<Mcp::Transport::HttpTransport>(
+		info.HttpServer, corsConfig);
+
+	// Wire transport request handler → module's HandleJsonRpc
+	info.Transport->SetRequestHandler(
+		[m](Mcp::Transport::ITransportRequest& req,
+			Mcp::Transport::ITransportResponse& resp) {
+			std::string body = req.GetBody();
+			std::string response = m->HandleJsonRpc(body);
+
+			if (response.empty())
+			{
+				resp.SetNoContent();
+				return;
+			}
+
+			resp.SetStatus(200, "OK");
+			resp.SetContentType("application/json; charset=utf-8");
+			resp.SetBody(response);
+		});
+
+	// Bridge Indy OnCommandGet → HttpTransport via __closure
+	info.EventBridge = new THttpEventBridge();
+	info.EventBridge->FTransport = info.Transport.get();
+	info.HttpServer->OnCommandGet = info.EventBridge->OnCommandGet;
+
+	// Start listening
+	info.Transport->Start();
+}
+
+void TfrmMain::StopModuleHttp(int index)
+{
+	if (index < 0 || index >= (int)FModuleHttp.size())
+		return;
+
+	auto& info = FModuleHttp[index];
+
+	if (info.Transport)
+	{
+		info.Transport->Stop();
+		info.Transport.reset();
+	}
+	if (info.EventBridge)
+	{
+		delete info.EventBridge;
+		info.EventBridge = nullptr;
+	}
+	if (info.HttpServer)
+	{
+		delete info.HttpServer;
+		info.HttpServer = nullptr;
+	}
 }
 
 //---------------------------------------------------------------------------

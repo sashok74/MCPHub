@@ -47,6 +47,9 @@ public:
 	virtual ModuleState GetState() const = 0;
 	virtual std::string GetLastError() const = 0;
 
+	// --- Request handling ---
+	virtual std::string HandleJsonRpc(const std::string& requestJson) = 0;
+
 	// --- Observability ---
 	virtual int GetPort() const = 0;
 	virtual int GetToolCount() const = 0;

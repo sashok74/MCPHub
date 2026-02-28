@@ -71,8 +71,8 @@
         <Icon_MainIcon>$(BDS)\bin\cbuilder_PROJECTICON.ico</Icon_MainIcon>
         <UWP_CppLogo44>$(BDS)\bin\Artwork\Windows\UWP\cppreg_UwpDefault_44.png</UWP_CppLogo44>
         <UWP_CppLogo150>$(BDS)\bin\Artwork\Windows\UWP\cppreg_UwpDefault_150.png</UWP_CppLogo150>
-        <IncludePath>src\servers\merpHelper\;..\MERP\src\;..\MERP\helpers\;src\modules\;src\config\;src\ui\;external\codeUtf8\;sqlite3\;..\ProjectMemory\src\mcp\;..\ProjectMemory\src\mcp\tools\;..\ProjectMemory\src\mcp\localdb\;..\DB_MCP\src\mcp\;..\DB_MCP\src\mcp\tools\;..\DB_MCP\src\transport\;..\DB_MCP\src\transport\http\;..\DB_MCP\src\db\;..\DB_MCP\src\db\providers\;external\;$(IncludePath)</IncludePath>
-        <ILINK_LibraryPath>src\servers\merpHelper\;..\MERP\src\;..\MERP\helpers\;src\modules\;src\config\;src\ui\;external\codeUtf8\;sqlite3\;..\ProjectMemory\src\mcp\;..\ProjectMemory\src\mcp\tools\;..\ProjectMemory\src\mcp\localdb\;..\DB_MCP\src\mcp\;..\DB_MCP\src\mcp\tools\;..\DB_MCP\src\transport\;..\DB_MCP\src\transport\http\;..\DB_MCP\src\db\;..\DB_MCP\src\db\providers\;external\;$(ILINK_LibraryPath)</ILINK_LibraryPath>
+        <IncludePath>src\mcp\;src\transport\;src\transport\http\;src\servers\dbMcp\;src\servers\dbMcp\db\;src\servers\dbMcp\db\providers\;src\servers\projectMemory\;src\servers\merpHelper\;src\modules\;src\config\;src\ui\;external\codeUtf8\;sqlite3\;external\;$(IncludePath)</IncludePath>
+        <ILINK_LibraryPath>src\mcp\;src\transport\;src\transport\http\;src\servers\dbMcp\;src\servers\dbMcp\db\;src\servers\dbMcp\db\providers\;src\servers\projectMemory\;src\servers\merpHelper\;src\modules\;src\config\;src\ui\;external\codeUtf8\;sqlite3\;external\;$(ILINK_LibraryPath)</ILINK_LibraryPath>
         <SanitizedProjectName>MCPHub</SanitizedProjectName>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win64x)'!=''">
@@ -133,36 +133,36 @@
         <DynamicRTL>false</DynamicRTL>
     </PropertyGroup>
     <ItemGroup>
-        <CppCompile Include="..\DB_MCP\src\db\DbProviderBase.cpp">
-            <DependentOn>..\DB_MCP\src\db\DbProviderBase.h</DependentOn>
+        <CppCompile Include="src\servers\dbMcp\db\DbProviderBase.cpp">
+            <DependentOn>src\servers\dbMcp\db\DbProviderBase.h</DependentOn>
             <BuildOrder>13</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\DB_MCP\src\db\DbProviderFactory.cpp">
-            <DependentOn>..\DB_MCP\src\db\DbProviderFactory.h</DependentOn>
+        <CppCompile Include="src\servers\dbMcp\db\DbProviderFactory.cpp">
+            <DependentOn>src\servers\dbMcp\db\DbProviderFactory.h</DependentOn>
             <BuildOrder>14</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\DB_MCP\src\db\providers\FirebirdProvider.cpp">
-            <DependentOn>..\DB_MCP\src\db\providers\FirebirdProvider.h</DependentOn>
+        <CppCompile Include="src\servers\dbMcp\db\providers\FirebirdProvider.cpp">
+            <DependentOn>src\servers\dbMcp\db\providers\FirebirdProvider.h</DependentOn>
             <BuildOrder>17</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\DB_MCP\src\db\providers\MSSQLProvider.cpp">
-            <DependentOn>..\DB_MCP\src\db\providers\MSSQLProvider.h</DependentOn>
+        <CppCompile Include="src\servers\dbMcp\db\providers\MSSQLProvider.cpp">
+            <DependentOn>src\servers\dbMcp\db\providers\MSSQLProvider.h</DependentOn>
             <BuildOrder>16</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\DB_MCP\src\db\providers\PostgreSQLProvider.cpp">
-            <DependentOn>..\DB_MCP\src\db\providers\PostgreSQLProvider.h</DependentOn>
+        <CppCompile Include="src\servers\dbMcp\db\providers\PostgreSQLProvider.cpp">
+            <DependentOn>src\servers\dbMcp\db\providers\PostgreSQLProvider.h</DependentOn>
             <BuildOrder>18</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\DB_MCP\src\db\VclDbProviderAdapter.cpp">
-            <DependentOn>..\DB_MCP\src\db\VclDbProviderAdapter.h</DependentOn>
+        <CppCompile Include="src\servers\dbMcp\db\VclDbProviderAdapter.cpp">
+            <DependentOn>src\servers\dbMcp\db\VclDbProviderAdapter.h</DependentOn>
             <BuildOrder>15</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\DB_MCP\src\transport\http\CorsValidator.cpp">
-            <DependentOn>..\DB_MCP\src\transport\http\CorsValidator.h</DependentOn>
+        <CppCompile Include="src\transport\http\CorsValidator.cpp">
+            <DependentOn>src\transport\http\CorsValidator.h</DependentOn>
             <BuildOrder>12</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\DB_MCP\src\transport\http\HttpTransport.cpp">
-            <DependentOn>..\DB_MCP\src\transport\http\HttpTransport.h</DependentOn>
+        <CppCompile Include="src\transport\http\HttpTransport.cpp">
+            <DependentOn>src\transport\http\HttpTransport.h</DependentOn>
             <BuildOrder>11</BuildOrder>
         </CppCompile>
         <CppCompile Include="external\codeUtf8\UcodeUtf8.cpp">
@@ -187,8 +187,8 @@
             <DependentOn>src\config\HubConfig.h</DependentOn>
             <BuildOrder>8</BuildOrder>
         </CppCompile>
-        <CppCompile Include="src\modules\DbMcpModule.cpp">
-            <DependentOn>src\modules\DbMcpModule.h</DependentOn>
+        <CppCompile Include="src\servers\dbMcp\DbMcpModule.cpp">
+            <DependentOn>src\servers\dbMcp\DbMcpModule.h</DependentOn>
             <BuildOrder>7</BuildOrder>
         </CppCompile>
         <CppCompile Include="src\modules\McpModuleBase.cpp">
@@ -199,8 +199,8 @@
             <DependentOn>src\modules\ModuleRegistry.h</DependentOn>
             <BuildOrder>4</BuildOrder>
         </CppCompile>
-        <CppCompile Include="src\modules\ProjectMemoryModule.cpp">
-            <DependentOn>src\modules\ProjectMemoryModule.h</DependentOn>
+        <CppCompile Include="src\servers\projectMemory\ProjectMemoryModule.cpp">
+            <DependentOn>src\servers\projectMemory\ProjectMemoryModule.h</DependentOn>
             <BuildOrder>6</BuildOrder>
         </CppCompile>
         <CppCompile Include="src\modules\RegisterModules.cpp">
@@ -225,29 +225,28 @@
             <DependentOn>uMain.h</DependentOn>
             <BuildOrder>2</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\MERP\helpers\AlignedBlock.cpp">
+        <CppCompile Include="src\servers\merpHelper\AlignedBlock.cpp">
             <BuildOrder>30</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\MERP\helpers\DataTypeMapper.cpp">
+        <CppCompile Include="src\servers\merpHelper\DataTypeMapper.cpp">
             <BuildOrder>29</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\MERP\src\CodeGenerator.cpp">
+        <CppCompile Include="src\servers\merpHelper\CodeGenerator.cpp">
             <BuildOrder>26</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\MERP\src\MsSqlQueryStorage.cpp">
+        <CppCompile Include="src\servers\merpHelper\MsSqlQueryStorage.cpp">
             <BuildOrder>24</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\MERP\src\ParamCollector.cpp">
+        <CppCompile Include="src\servers\merpHelper\ParamCollector.cpp">
             <BuildOrder>25</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\MERP\src\sqlHelper.cpp">
+        <CppCompile Include="src\servers\merpHelper\sqlHelper.cpp">
             <BuildOrder>28</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\MERP\src\TemplateEngine.cpp">
+        <CppCompile Include="src\servers\merpHelper\TemplateEngine.cpp">
             <BuildOrder>27</BuildOrder>
         </CppCompile>
-        <CppCompile Include="..\ProjectMemory\src\mcp\localdb\LocalMcpDb.cpp">
-            <DependentOn>..\ProjectMemory\src\mcp\localdb\LocalMcpDb.h</DependentOn>
+        <CppCompile Include="src\servers\projectMemory\LocalMcpDb.cpp">
             <BuildOrder>10</BuildOrder>
         </CppCompile>
         <BuildConfiguration Include="Base">

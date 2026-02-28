@@ -1,9 +1,9 @@
 //---------------------------------------------------------------------------
 #pragma hdrstop
 #include "RegisterModules.h"
-#include "ProjectMemoryModule.h"
-#include "DbMcpModule.h"
-#include "MerpHelperModule.h"
+#include "ProjectMemoryModule.h"   // src/servers/projectMemory/
+#include "DbMcpModule.h"            // src/servers/dbMcp/
+#include "MerpHelperModule.h"       // src/servers/merpHelper/
 //---------------------------------------------------------------------------
 #pragma package(smart_init)
 

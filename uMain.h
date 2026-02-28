@@ -1,4 +1,4 @@
-﻿//---------------------------------------------------------------------------
+//---------------------------------------------------------------------------
 // uMain.h — MCPHub main form
 //---------------------------------------------------------------------------
 
@@ -20,27 +20,52 @@
 #include <FireDAC.Phys.PGDef.hpp>
 #include <FireDAC.Phys.PG.hpp>
 #include <FireDAC.VCLUI.Wait.hpp>
+#include <FireDAC.Comp.UI.hpp>
+#include <FireDAC.Phys.hpp>
+#include <FireDAC.Phys.IBBase.hpp>
+#include <FireDAC.Phys.ODBCBase.hpp>
+#include <FireDAC.Stan.Intf.hpp>
+#include <FireDAC.UI.Intf.hpp>
+#include <IdHTTPServer.hpp>
 
 #include "ModuleRegistry.h"
 #include "HubConfig.h"
 #include "ConfigPanelBuilder.h"
 #include "IMcpModule.h"
-#include <FireDAC.Comp.UI.hpp>
+#include "HttpTransport.h"
 
-#include <FireDAC.Phys.hpp>
-
-#include <FireDAC.Phys.IBBase.hpp>
-#include <FireDAC.Phys.ODBCBase.hpp>
-#include <FireDAC.Stan.Intf.hpp>
-#include <FireDAC.UI.Intf.hpp>#
-#include <FireDAC.UI.Intf.hpp>
-#include <FireDAC.Stan.Intf.hpp>
-
-#include <FireDAC.UI.Intf.hpp>#include <FireDAC.Phys.ODBCBase.hpp>i
-#include <FireDAC.Stan.Intf.hpp>n
-#include <FireDAC.UI.Intf.hpp>clude <vector>
+#include <vector>
 #include <memory>
 #include <string>
+
+//---------------------------------------------------------------------------
+// Helper: bridges Indy OnCommandGet event to HttpTransport
+//---------------------------------------------------------------------------
+class THttpEventBridge : public TObject
+{
+public:
+	Mcp::Transport::HttpTransport* FTransport;
+
+	THttpEventBridge() : FTransport(nullptr) {}
+
+	void __fastcall OnCommandGet(TIdContext *AContext,
+		TIdHTTPRequestInfo *ARequestInfo,
+		TIdHTTPResponseInfo *AResponseInfo)
+	{
+		if (FTransport)
+			FTransport->HandleCommandGet(AContext, ARequestInfo, AResponseInfo);
+	}
+};
+
+//---------------------------------------------------------------------------
+// Per-module HTTP server tracking
+//---------------------------------------------------------------------------
+struct ModuleHttpInfo
+{
+	TIdHTTPServer* HttpServer = nullptr;
+	THttpEventBridge* EventBridge = nullptr;
+	std::unique_ptr<Mcp::Transport::HttpTransport> Transport;
+};
 
 //---------------------------------------------------------------------------
 
@@ -114,6 +139,7 @@ private:
 	ModuleRegistry FRegistry;
 	HubConfig FConfig;
 	std::vector<std::unique_ptr<IMcpModule>> FModules;
+	std::vector<ModuleHttpInfo> FModuleHttp;
 	std::vector<ConfigPanelField> FCurrentConfigFields;
 	struct LogEntry { std::string request, response; };
 	std::vector<LogEntry> FModuleLogs;
@@ -135,6 +161,10 @@ private:
 	void SaveConfig();
 	std::string GenerateInstanceId();
 	bool IsPortInUse(int port, int excludeIndex);
+
+	// HTTP lifecycle — host owns the HTTP servers
+	void StartModuleHttp(int index);
+	void StopModuleHttp(int index);
 
 public:
 	__fastcall TfrmMain(TComponent* Owner);

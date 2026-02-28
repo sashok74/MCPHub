@@ -9,30 +9,9 @@
 #include "LocalMcpDb.h"
 #include "McpServer.h"
 #include "McpHandler.h"
-#include "HttpTransport.h"
 #include "ToolDefs.h"
-#include <IdHTTPServer.hpp>
 #include <memory>
 #include <atomic>
-
-//---------------------------------------------------------------------------
-// Helper: bridges Indy OnCommandGet event to HttpTransport
-//---------------------------------------------------------------------------
-class THttpEventBridge : public TObject
-{
-public:
-	Mcp::Transport::HttpTransport* FTransport;
-
-	THttpEventBridge() : FTransport(nullptr) {}
-
-	void __fastcall OnCommandGet(TIdContext *AContext,
-		TIdHTTPRequestInfo *ARequestInfo,
-		TIdHTTPResponseInfo *AResponseInfo)
-	{
-		if (FTransport)
-			FTransport->HandleCommandGet(AContext, ARequestInfo, AResponseInfo);
-	}
-};
 
 //---------------------------------------------------------------------------
 
@@ -57,6 +36,9 @@ public:
 	ModuleState GetState() const override { return FState; }
 	std::string GetLastError() const override { return FLastError; }
 
+	// --- IMcpModule: Request handling ---
+	std::string HandleJsonRpc(const std::string& requestJson) override;
+
 	// --- IMcpModule: Observability ---
 	int GetPort() const override;
 	int GetToolCount() const override { return (int)FToolNames.size(); }
@@ -76,11 +58,8 @@ protected:
 	virtual void OnShutdown() = 0;
 	virtual std::string GetMcpServerName() const { return GetDisplayName(); }
 
-	// MCP stack
+	// MCP stack (no HTTP — host owns that)
 	std::unique_ptr<Mcp::TMcpServer> FMcpServer;
-	std::unique_ptr<Mcp::TMcpHandler> FMcpHandler;
-	std::unique_ptr<Mcp::Transport::HttpTransport> FHttpTransport;
-	TIdHTTPServer* FHttpServer;
 	std::unique_ptr<LocalMcpDb> FLocalDb;
 
 	// Identity & config
@@ -102,7 +81,6 @@ protected:
 
 private:
 	void SetState(ModuleState state);
-	THttpEventBridge* FEventBridge;
 };
 
 //---------------------------------------------------------------------------
