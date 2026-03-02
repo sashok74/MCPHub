@@ -6,6 +6,7 @@
 #define ProjectMemoryModuleH
 
 #include "McpModuleBase.h"
+#include "DbMcpFederation.h"
 
 //---------------------------------------------------------------------------
 
@@ -25,6 +26,9 @@ protected:
 	Mcp::Tools::ToolList OnRegisterTools() override;
 	void OnShutdown() override {}
 	std::string GetMcpServerName() const override { return "project-memory"; }
+
+private:
+	std::unique_ptr<Federation::DbMcpClient> FDbMcpClient;
 };
 
 //---------------------------------------------------------------------------

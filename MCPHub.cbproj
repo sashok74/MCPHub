@@ -85,6 +85,7 @@
         <Manifest_File>$(BDS)\bin\default_app.manifest</Manifest_File>
         <BCC_EnableBatchCompilation>true</BCC_EnableBatchCompilation>
         <BCC_PCHName_Clang>MCPHubPCH.h</BCC_PCHName_Clang>
+        <ILINK_LibraryPath>C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64;$(ILINK_LibraryPath)</ILINK_LibraryPath>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_1)'!=''">
         <BCC_OptimizeForSpeed>false</BCC_OptimizeForSpeed>

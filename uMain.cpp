@@ -146,9 +146,17 @@ void __fastcall TfrmMain::FormShow(TObject *Sender)
 	{
 		if (i < FConfig.GetModules().size() && FConfig.GetModules()[i].autoStart)
 		{
-			FModules[i]->Start();
-			if (FModules[i]->GetState() == ModuleState::Running)
-				StartModuleHttp((int)i);
+			try
+			{
+				FModules[i]->Start();
+				if (FModules[i]->GetState() == ModuleState::Running)
+					StartModuleHttp((int)i);
+			}
+			catch (...)
+			{
+				// Module failed to start — continue with others
+			}
+			UpdateModuleRow((int)i);
 		}
 	}
 
@@ -413,7 +421,22 @@ void __fastcall TfrmMain::btnStartClick(TObject *Sender)
 
 	m->Start();
 	if (m->GetState() == ModuleState::Running)
-		StartModuleHttp(FSelectedIndex);
+	{
+		try
+		{
+			StartModuleHttp(FSelectedIndex);
+		}
+		catch (const Exception& e)
+		{
+			m->Stop();
+			ShowMessage(L"Failed to start HTTP on port " + IntToStr(m->GetPort()) + L": " + e.Message);
+		}
+		catch (const std::exception& e)
+		{
+			m->Stop();
+			ShowMessage(u("Failed to start HTTP: " + std::string(e.what())));
+		}
+	}
 
 	UpdateModuleRow(FSelectedIndex);
 	UpdateStatusBar();
@@ -461,9 +484,16 @@ void __fastcall TfrmMain::btnStartAllClick(TObject *Sender)
 	{
 		if (FModules[i]->GetState() != ModuleState::Running)
 		{
-			FModules[i]->Start();
-			if (FModules[i]->GetState() == ModuleState::Running)
-				StartModuleHttp((int)i);
+			try
+			{
+				FModules[i]->Start();
+				if (FModules[i]->GetState() == ModuleState::Running)
+					StartModuleHttp((int)i);
+			}
+			catch (...)
+			{
+				// Continue starting other modules
+			}
 			UpdateModuleRow((int)i);
 		}
 	}
@@ -606,41 +636,64 @@ void TfrmMain::StartModuleHttp(int index)
 	if (port <= 0)
 		return;
 
-	// Create TIdHTTPServer
-	info.HttpServer = new TIdHTTPServer(nullptr);
-	info.HttpServer->DefaultPort = port;
+	try
+	{
+		// Create TIdHTTPServer
+		info.HttpServer = new TIdHTTPServer(nullptr);
+		info.HttpServer->DefaultPort = port;
 
-	// Create HttpTransport with CORS
-	Mcp::Transport::TCorsConfig corsConfig;
-	corsConfig.AllowLocalhost = true;
-	info.Transport = std::make_unique<Mcp::Transport::HttpTransport>(
-		info.HttpServer, corsConfig);
+		// Create HttpTransport with CORS
+		Mcp::Transport::TCorsConfig corsConfig;
+		corsConfig.AllowLocalhost = true;
+		info.Transport = std::make_unique<Mcp::Transport::HttpTransport>(
+			info.HttpServer, corsConfig);
 
-	// Wire transport request handler → module's HandleJsonRpc
-	info.Transport->SetRequestHandler(
-		[m](Mcp::Transport::ITransportRequest& req,
-			Mcp::Transport::ITransportResponse& resp) {
-			std::string body = req.GetBody();
-			std::string response = m->HandleJsonRpc(body);
+		// Wire transport request handler → module's HandleJsonRpc
+		info.Transport->SetRequestHandler(
+			[m](Mcp::Transport::ITransportRequest& req,
+				Mcp::Transport::ITransportResponse& resp) {
+				std::string body = req.GetBody();
+				std::string response = m->HandleJsonRpc(body);
 
-			if (response.empty())
-			{
-				resp.SetNoContent();
-				return;
-			}
+				if (response.empty())
+				{
+					resp.SetNoContent();
+					return;
+				}
 
-			resp.SetStatus(200, "OK");
-			resp.SetContentType("application/json; charset=utf-8");
-			resp.SetBody(response);
-		});
+				resp.SetStatus(200, "OK");
+				resp.SetContentType("application/json; charset=utf-8");
+				resp.SetBody(response);
+			});
 
-	// Bridge Indy OnCommandGet → HttpTransport via __closure
-	info.EventBridge = new THttpEventBridge();
-	info.EventBridge->FTransport = info.Transport.get();
-	info.HttpServer->OnCommandGet = info.EventBridge->OnCommandGet;
+		// Bridge Indy OnCommandGet → HttpTransport via __closure
+		info.EventBridge = new THttpEventBridge();
+		info.EventBridge->FTransport = info.Transport.get();
+		info.HttpServer->OnCommandGet = info.EventBridge->OnCommandGet;
 
-	// Start listening
-	info.Transport->Start();
+		// Start listening
+		info.Transport->Start();
+	}
+	catch (const Exception& e)
+	{
+		// Clean up partial state on failure
+		info.Transport.reset();
+		delete info.EventBridge; info.EventBridge = nullptr;
+		delete info.HttpServer;  info.HttpServer = nullptr;
+
+		// Propagate error to module
+		m->Stop();
+		throw;
+	}
+	catch (const std::exception& e)
+	{
+		info.Transport.reset();
+		delete info.EventBridge; info.EventBridge = nullptr;
+		delete info.HttpServer;  info.HttpServer = nullptr;
+
+		m->Stop();
+		throw;
+	}
 }
 
 void TfrmMain::StopModuleHttp(int index)

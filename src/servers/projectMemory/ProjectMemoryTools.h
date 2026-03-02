@@ -1,10 +1,12 @@
 ﻿//---------------------------------------------------------------------------
 // ProjectMemoryTools.h — MCP Tools for Project Memory
 //
-// 34 tools for knowledge management:
+// 40 tools for knowledge management:
 //   Facts, Forms, Processes, Glossary, Queries, Patterns,
 //   Relationships, Modules, Entity Status, Stats, Feature Requests,
-//   Completed Tasks, UI Routes, UI Research
+//   Completed Tasks, UI Routes, UI Research,
+//   Batch Context, Gaps Analysis, Quality Report, Knowledge Gaps,
+//   Context Feedback, Prepare Context
 //---------------------------------------------------------------------------
 
 #ifndef ProjectMemoryToolsH
@@ -12,6 +14,7 @@
 
 #include "ToolDefs.h"
 #include "LocalMcpDb.h"
+#include "DbMcpFederation.h"
 #include <sstream>
 #include <set>
 #include <map>
@@ -21,6 +24,20 @@ namespace Mcp { namespace Tools {
 
 using json = nlohmann::json;
 using Params = LocalMcpDb::Params;
+
+//---------------------------------------------------------------------------
+// Helper: truncate string at UTF-8 boundary (never splits multi-byte chars)
+//---------------------------------------------------------------------------
+inline std::string TruncateUtf8(const std::string &s, size_t maxBytes,
+	const std::string &suffix = "...")
+{
+	if (s.size() <= maxBytes) return s;
+	size_t pos = maxBytes;
+	// Walk back to find a valid UTF-8 character boundary
+	while (pos > 0 && (static_cast<unsigned char>(s[pos]) & 0xC0) == 0x80)
+		--pos;
+	return s.substr(0, pos) + suffix;
+}
 
 //---------------------------------------------------------------------------
 // Helper: get string from json, or default
@@ -365,9 +382,135 @@ inline json RankedSearch(LocalMcpDb *db, Params &p,
 }
 
 //---------------------------------------------------------------------------
-// GetProjectMemoryTools — Returns all 34 tools
+// FederateEntity — fetch schema/FK from dbmcp and cache in SQLite
+// Returns true if new data was fetched, false if skipped or error
 //---------------------------------------------------------------------------
-inline ToolList GetProjectMemoryTools(LocalMcpDb *db)
+inline bool FederateEntity(LocalMcpDb *db, Federation::DbMcpClient *fedClient,
+	const std::string &entity, std::string *outError = nullptr)
+{
+	if (!fedClient || !db || entity.empty())
+		return false;
+
+	// Skip if schema fact already cached
+	try {
+		LocalMcpDb::Params chk;
+		chk["entity"] = entity;
+		json existing = db->Query(
+			"SELECT id FROM facts WHERE entity = :entity AND fact_type = 'schema' LIMIT 1", chk);
+		if (!existing.empty())
+			return false;
+	} catch (...) { return false; }
+
+	bool fetched = false;
+
+	// --- Fetch table schema ---
+	std::string fedError;
+	try {
+		json schema = fedClient->GetTableSchema(entity);
+		if (!schema.is_null() && schema.contains("rows") && schema["rows"].is_array()
+			&& schema.value("rowCount", 0) > 0)
+		{
+			std::ostringstream desc;
+			desc << "Table " << entity << " columns:\n";
+			for (const auto &col : schema["rows"]) {
+				std::string field = col.value("field", std::string());
+				std::string type = col.value("type", std::string());
+				desc << "  " << field << " " << type;
+				if (col.contains("is_primary_key") && !col["is_primary_key"].is_null()
+					&& col["is_primary_key"].is_number() && col["is_primary_key"].get<int>() == 1)
+					desc << " [PK]";
+				if (col.contains("nullable") && col["nullable"].is_string()
+					&& col["nullable"].get<std::string>() == "NO")
+					desc << " NOT NULL";
+				if (col.contains("references_table") && col["references_table"].is_string()) {
+					std::string refTable = col["references_table"].get<std::string>();
+					if (!refTable.empty()) {
+						if (refTable.substr(0, 4) == "dbo.")
+							refTable = refTable.substr(4);
+						desc << " -> " << refTable;
+					}
+				}
+				desc << "\n";
+			}
+
+			LocalMcpDb::Params ip;
+			ip["entity"] = entity;
+			ip["fact_type"] = std::string("schema");
+			ip["description"] = desc.str();
+			ip["evidence"] = std::string("auto:dbmcp_federation");
+			ip["confidence"] = std::string("verified");
+			db->Execute(
+				"INSERT INTO facts (entity, fact_type, description, evidence, confidence) "
+				"VALUES (:entity, :fact_type, :description, :evidence, :confidence)", ip);
+			fetched = true;
+		}
+	} catch (const std::exception &e) { fedError = e.what(); }
+	  catch (...) { fedError = "unknown"; }
+
+	// --- Fetch table relations ---
+	try {
+		json rels = fedClient->GetTableRelations(entity);
+		if (!rels.is_null() && rels.contains("rows") && rels["rows"].is_array()
+			&& rels.value("rowCount", 0) > 0)
+		{
+			for (const auto &fk : rels["rows"]) {
+				std::string fromTable = fk.value("from_table", std::string());
+				std::string toTable = fk.value("to_table", std::string());
+				std::string fromCol = fk.value("from_column", std::string());
+				std::string toCol = fk.value("to_column", std::string());
+				std::string constraint = fk.value("constraint_name", std::string());
+
+				// Strip dbo. prefix
+				if (fromTable.substr(0, 4) == "dbo.")
+					fromTable = fromTable.substr(4);
+				if (toTable.substr(0, 4) == "dbo.")
+					toTable = toTable.substr(4);
+
+				if (fromTable.empty() || toTable.empty())
+					continue;
+
+				std::string desc = fromCol + " -> " + toTable + "." + toCol;
+				if (!constraint.empty())
+					desc += " (" + constraint + ")";
+
+				LocalMcpDb::Params rp;
+				rp["entity_from"] = fromTable;
+				rp["entity_to"] = toTable;
+				rp["rel_type"] = std::string("references");
+				rp["description"] = desc;
+				rp["evidence"] = std::string("auto:dbmcp_federation");
+				db->Execute(
+					"INSERT OR REPLACE INTO relationships "
+					"(entity_from, entity_to, rel_type, description, evidence) "
+					"VALUES (:entity_from, :entity_to, :rel_type, :description, :evidence)", rp);
+			}
+			fetched = true;
+		}
+	} catch (...) {}
+
+	// Update entity status to schema_only
+	if (fetched) {
+		try {
+			LocalMcpDb::Params sp;
+			sp["entity"] = entity;
+			sp["coverage"] = std::string("schema_only");
+			sp["notes"] = std::string("Auto-federated from dbmcp");
+			db->Execute(
+				"INSERT OR REPLACE INTO entity_status (entity, coverage, notes) "
+				"VALUES (:entity, :coverage, :notes)", sp);
+		} catch (...) {}
+	}
+
+	if (outError && !fedError.empty())
+		*outError = fedError;
+
+	return fetched;
+}
+
+//---------------------------------------------------------------------------
+// GetProjectMemoryTools — Returns all 40 tools
+//---------------------------------------------------------------------------
+inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *fedClient = nullptr)
 {
 	ToolList tools;
 
@@ -408,6 +551,15 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db)
 					"INSERT INTO facts (entity, fact_type, description, evidence, confidence, task_context) "
 					"VALUES (:entity, :fact_type, :description, :evidence, :confidence, :task_context)", p);
 				long long id = db->LastInsertRowId();
+
+				// Auto-resolve search gaps mentioning this entity
+				try {
+					Params rp;
+					rp["ent"] = "%" + entity + "%";
+					db->Execute(
+						"UPDATE search_gaps SET resolved=1, resolved_by='save_fact', resolved_at=datetime('now') "
+						"WHERE resolved=0 AND query_text LIKE :ent", rp);
+				} catch (...) {}
 
 				json resp;
 				resp["success"] = true;
@@ -505,6 +657,17 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db)
 
 			try {
 				json rows = db->Query(sql, p);
+
+				// Auto-log search gap if no results
+				if (rows.empty()) {
+					try {
+						Params gp;
+						gp["qt"] = query;
+						gp["tn"] = "search_facts";
+						db->Execute("INSERT INTO search_gaps(query_text, tool_name, result_count) VALUES(:qt,:tn,0)", gp);
+					} catch (...) {}
+				}
+
 				json resp;
 				resp["facts"] = rows;
 				resp["count"] = rows.size();
@@ -681,6 +844,16 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db)
 					"SELECT bp.* FROM business_processes bp WHERE bp.name LIKE :like_pattern OR bp.description LIKE :like_pattern "
 					"ORDER BY id", p);
 
+				// Auto-log search gap if no results
+				if (rows.empty()) {
+					try {
+						Params gp;
+						gp["qt"] = query;
+						gp["tn"] = "find_process";
+						db->Execute("INSERT INTO search_gaps(query_text, tool_name, result_count) VALUES(:qt,:tn,0)", gp);
+					} catch (...) {}
+				}
+
 				json resp;
 				resp["processes"] = rows;
 				resp["count"] = rows.size();
@@ -801,6 +974,15 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db)
 					"VALUES (:purpose, :sql_text, :result_summary, :notes)", p);
 				long long id = db->LastInsertRowId();
 
+				// Auto-resolve search gaps mentioning this purpose
+				try {
+					Params rp;
+					rp["purp"] = "%" + purpose + "%";
+					db->Execute(
+						"UPDATE search_gaps SET resolved=1, resolved_by='save_query', resolved_at=datetime('now') "
+						"WHERE resolved=0 AND query_text LIKE :purp", rp);
+				} catch (...) {}
+
 				json resp;
 				resp["success"] = true;
 				resp["id"] = id;
@@ -838,6 +1020,16 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db)
 					"UNION "
 					"SELECT vq.* FROM verified_queries vq WHERE vq.purpose LIKE :like_pattern "
 					"ORDER BY id", p);
+
+				// Auto-log search gap if no results
+				if (rows.empty()) {
+					try {
+						Params gp;
+						gp["qt"] = purpose;
+						gp["tn"] = "get_query";
+						db->Execute("INSERT INTO search_gaps(query_text, tool_name, result_count) VALUES(:qt,:tn,0)", gp);
+					} catch (...) {}
+				}
 
 				json resp;
 				resp["queries"] = rows;
@@ -1048,6 +1240,16 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db)
 				int totalMatches = (int)(glossaryMatches.size() + processMatches.size()
 					+ factMatches.size() + queryMatches.size() + patternMatches.size()
 					+ formMatches.size() + relMatches.size());
+
+				// Auto-log search gap if no results across all stores
+				if (totalMatches == 0) {
+					try {
+						Params gp;
+						gp["qt"] = question;
+						gp["tn"] = "ask_business";
+						db->Execute("INSERT INTO search_gaps(query_text, tool_name, result_count) VALUES(:qt,:tn,0)", gp);
+					} catch (...) {}
+				}
 
 				// === Full mode: return raw results from all tables ===
 				if (mode == "full") {
@@ -1351,6 +1553,22 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db)
 			std::string sql = "UPDATE facts SET " + setClauses + " WHERE id = :id";
 
 			try {
+				// Save fact history before updating
+				if (p.count("description")) {
+					try {
+						Params hp;
+						hp["fid"] = std::to_string(id);
+						hp["new_desc"] = p["description"];
+						json oldRow = db->Query("SELECT description FROM facts WHERE id = :fid", hp);
+						if (!oldRow.empty()) {
+							hp["old_desc"] = oldRow[0].value("description", std::string());
+							db->Execute(
+								"INSERT INTO fact_history(fact_id, old_description, new_description) "
+								"VALUES(:fid, :old_desc, :new_desc)", hp);
+						}
+					} catch (...) {}
+				}
+
 				int affected = db->Execute(sql, p);
 
 				json resp;
@@ -2345,6 +2563,1091 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db)
 				json resp;
 				resp["research"] = rows;
 				resp["count"] = rows.size();
+				return TMcpToolResult::Success(resp);
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 35. batch_context — full context for N entities in one call
+	//=======================================================================
+	tools.push_back({
+		"batch_context",
+		"Get full context for multiple entities in one call. Returns facts, relationships, "
+		"form mappings, glossary entries, and coverage status for each entity. "
+		"Much more efficient than calling get_facts + get_relationships + find_form separately.",
+		TMcpToolSchema()
+			.AddString("entities", "JSON array of entity names (e.g. [\"MoveMaterials\",\"Product\"])", true),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			json entArr = GetArray(args, "entities");
+			if (entArr.empty())
+				return TMcpToolResult::Error("Missing or empty parameter: entities (expected JSON array)");
+
+			std::vector<std::string> entities;
+			for (const auto &e : entArr) {
+				if (e.is_string() && !e.get<std::string>().empty())
+					entities.push_back(e.get<std::string>());
+			}
+			if (entities.empty())
+				return TMcpToolResult::Error("No valid entity names provided");
+			if (entities.size() > 20)
+				entities.resize(20);
+
+			try {
+				// Build IN clause
+				std::string inC = "(";
+				for (size_t i = 0; i < entities.size(); i++) {
+					if (i > 0) inC += ",";
+					inC += "'" + EscapeSqlString(entities[i]) + "'";
+				}
+				inC += ")";
+
+				auto safeQ = [db](const std::string &sql) -> json {
+					try { return db->Query(sql, {}); }
+					catch (...) { return json::array(); }
+				};
+
+				// Batch queries
+				json allFacts = safeQ("SELECT * FROM facts WHERE entity IN " + inC + " ORDER BY entity, fact_type");
+				json allRels = safeQ(
+					"SELECT * FROM relationships WHERE entity_from IN " + inC + " OR entity_to IN " + inC);
+				json allForms = safeQ("SELECT * FROM form_table_map WHERE main_table IN " + inC
+					+ " OR template IN " + inC);
+				json allGloss = safeQ("SELECT * FROM glossary WHERE entity IN " + inC);
+				json allStatus = safeQ("SELECT * FROM entity_status WHERE entity IN " + inC);
+				json allModules = safeQ("SELECT * FROM entity_modules WHERE entity IN " + inC);
+
+				// Group by entity
+				std::map<std::string, json> factsByEnt, relsByEnt, glossByEnt;
+				std::map<std::string, json> formByEnt; // arrays of form mappings
+				std::map<std::string, std::string> statusByEnt, moduleByEnt;
+
+				for (const auto &f : allFacts) {
+					std::string e = f.value("entity", std::string());
+					if (!e.empty()) factsByEnt[e].push_back(f);
+				}
+				for (const auto &r : allRels) {
+					std::string ef = r.value("entity_from", std::string());
+					std::string et = r.value("entity_to", std::string());
+					if (!ef.empty()) relsByEnt[ef].push_back(r);
+					if (!et.empty() && et != ef) relsByEnt[et].push_back(r);
+				}
+				for (const auto &f : allForms) {
+					std::string mt = f.value("main_table", std::string());
+					std::string tp = f.value("template", std::string());
+					json compact = json{
+						{"template", f.value("template", std::string())},
+						{"class_name", f.value("class_name", std::string())},
+						{"file_path", f.value("file_path", std::string())},
+						{"main_table", f.value("main_table", std::string())}
+					};
+					if (!mt.empty()) formByEnt[mt].push_back(compact);
+					if (!tp.empty() && tp != mt) formByEnt[tp].push_back(compact);
+				}
+				for (const auto &g : allGloss) {
+					std::string e = g.value("entity", std::string());
+					if (!e.empty()) glossByEnt[e].push_back(g);
+				}
+				for (const auto &s : allStatus) {
+					std::string e = s.value("entity", std::string());
+					statusByEnt[e] = s.value("coverage", std::string("unknown"));
+				}
+				for (const auto &m : allModules) {
+					std::string e = m.value("entity", std::string());
+					moduleByEnt[e] = m.value("module_name", std::string());
+				}
+
+				// Build response per entity
+				json result = json::object();
+				for (const auto &ent : entities) {
+					json entry;
+					entry["coverage"] = statusByEnt.count(ent) ? statusByEnt[ent] : "unknown";
+					if (moduleByEnt.count(ent)) entry["module"] = moduleByEnt[ent];
+
+					// Facts (compact: id, type, description, confidence)
+					json facts = json::array();
+					if (factsByEnt.count(ent)) {
+						for (const auto &f : factsByEnt[ent]) {
+							facts.push_back(json{
+								{"id", f.value("id", (long long)0)},
+								{"type", f.value("fact_type", std::string())},
+								{"description", f.value("description", std::string())},
+								{"confidence", f.value("confidence", std::string())}
+							});
+						}
+					}
+					entry["facts"] = facts;
+					entry["fact_count"] = (int)facts.size();
+
+					// Relationships
+					json rels = json::array();
+					if (relsByEnt.count(ent)) {
+						for (const auto &r : relsByEnt[ent]) {
+							rels.push_back(json{
+								{"from", r.value("entity_from", std::string())},
+								{"to", r.value("entity_to", std::string())},
+								{"type", r.value("rel_type", std::string())},
+								{"description", r.value("description", std::string())}
+							});
+						}
+					}
+					entry["relationships"] = rels;
+
+					// Form mappings (array)
+					if (formByEnt.count(ent) && !formByEnt[ent].empty()) {
+						entry["forms"] = formByEnt[ent];
+					}
+
+					// Glossary (array — compact)
+					if (glossByEnt.count(ent) && !glossByEnt[ent].empty()) {
+						json glossArr = json::array();
+						for (const auto &g : glossByEnt[ent]) {
+							glossArr.push_back(json{
+								{"term", g.value("term", std::string())},
+								{"synonyms", g.value("synonyms", std::string())},
+								{"context", g.value("context", std::string())}
+							});
+						}
+						entry["glossary"] = glossArr;
+					}
+
+					result[ent] = entry;
+				}
+
+				return TMcpToolResult::Success(json{
+					{"entities", result},
+					{"count", (int)entities.size()}
+				});
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 36. identify_gaps — what's missing for each entity
+	//=======================================================================
+	tools.push_back({
+		"identify_gaps",
+		"Identify knowledge gaps for entities. For each entity: what fact types exist, what's missing, "
+		"completeness score (0-100), and suggested actions to fill gaps. "
+		"Use to prioritize knowledge collection efforts.",
+		TMcpToolSchema()
+			.AddString("entities", "JSON array of entity names", true),
+		[db, fedClient](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			json entArr = GetArray(args, "entities");
+			if (entArr.empty())
+				return TMcpToolResult::Error("Missing or empty parameter: entities");
+
+			std::vector<std::string> entities;
+			for (const auto &e : entArr) {
+				if (e.is_string() && !e.get<std::string>().empty())
+					entities.push_back(e.get<std::string>());
+			}
+			if (entities.empty())
+				return TMcpToolResult::Error("No valid entity names provided");
+			if (entities.size() > 20)
+				entities.resize(20);
+
+			try {
+				std::string inC = "(";
+				for (size_t i = 0; i < entities.size(); i++) {
+					if (i > 0) inC += ",";
+					inC += "'" + EscapeSqlString(entities[i]) + "'";
+				}
+				inC += ")";
+
+				auto safeQ = [db](const std::string &sql) -> json {
+					try { return db->Query(sql, {}); }
+					catch (...) { return json::array(); }
+				};
+
+				// Batch queries
+				json factTypes = safeQ("SELECT entity, fact_type, COUNT(*) as cnt FROM facts WHERE entity IN "
+					+ inC + " GROUP BY entity, fact_type");
+				json relCounts = safeQ(
+					"SELECT e, SUM(cnt) as total FROM ("
+					"  SELECT entity_from as e, COUNT(*) as cnt FROM relationships WHERE entity_from IN " + inC + " GROUP BY entity_from "
+					"  UNION ALL "
+					"  SELECT entity_to as e, COUNT(*) as cnt FROM relationships WHERE entity_to IN " + inC + " GROUP BY entity_to"
+					") GROUP BY e");
+				json statuses = safeQ("SELECT entity, coverage FROM entity_status WHERE entity IN " + inC);
+				json forms = safeQ("SELECT main_table FROM form_table_map WHERE main_table IN " + inC);
+				json glossary = safeQ("SELECT entity FROM glossary WHERE entity IN " + inC);
+
+				// Build lookup maps
+				std::map<std::string, std::set<std::string>> hasTypes;
+				std::map<std::string, int> relCountMap;
+				std::map<std::string, std::string> coverageMap;
+				std::set<std::string> hasForm, hasGloss;
+
+				for (const auto &r : factTypes) {
+					std::string e = r.value("entity", std::string());
+					std::string ft = r.value("fact_type", std::string());
+					if (!e.empty() && !ft.empty()) hasTypes[e].insert(ft);
+				}
+				for (const auto &r : relCounts) {
+					std::string e = r.value("e", std::string());
+					relCountMap[e] = (int)r.value("total", (long long)0);
+				}
+				for (const auto &r : statuses)
+					coverageMap[r.value("entity", std::string())] = r.value("coverage", std::string());
+				for (const auto &r : forms)
+					hasForm.insert(r.value("main_table", std::string()));
+				for (const auto &r : glossary)
+					hasGloss.insert(r.value("entity", std::string()));
+
+				// Federation: auto-fetch schema/FK from dbmcp for unknown entities
+				json fedLog = json::array();
+				if (fedClient) {
+					int fedCount = 0;
+					for (const auto &ent : entities) {
+						if (fedCount >= 3) break;
+						std::string cov = coverageMap.count(ent) ? coverageMap[ent] : "unknown";
+						bool hasSchema = hasTypes.count(ent) && hasTypes[ent].count("schema");
+						if (cov == "unknown" && !hasSchema) {
+							std::string fedErr;
+							bool ok = FederateEntity(db, fedClient, ent, &fedErr);
+							if (ok) {
+								fedLog.push_back(json{{"entity", ent}, {"status", "fetched"}});
+								hasTypes[ent].insert("schema");
+								coverageMap[ent] = "schema_only";
+								// Re-check relationship count
+								try {
+									LocalMcpDb::Params rp;
+									rp["ent"] = ent;
+									json rc = db->Query(
+										"SELECT COUNT(*) as cnt FROM relationships "
+										"WHERE entity_from = :ent OR entity_to = :ent", rp);
+									if (!rc.empty())
+										relCountMap[ent] = (int)rc[0].value("cnt", (long long)0);
+								} catch (...) {}
+								fedCount++;
+							}
+						}
+					}
+				}
+
+				// All desirable fact types
+				std::vector<std::string> allFactTypes = {
+					"schema", "business_rule", "gotcha", "code_pattern", "statistics", "relationship"
+				};
+
+				json result = json::object();
+				for (const auto &ent : entities) {
+					json entry;
+
+					std::string cov = coverageMap.count(ent) ? coverageMap[ent] : "unknown";
+					entry["coverage"] = cov;
+
+					// What exists
+					json has = json::array();
+					auto htIt = hasTypes.find(ent);
+					if (htIt != hasTypes.end())
+						for (const auto &t : htIt->second) has.push_back(t);
+					if (hasForm.count(ent)) has.push_back("form_mapping");
+					if (hasGloss.count(ent)) has.push_back("glossary");
+					if (relCountMap.count(ent) && relCountMap[ent] > 0) has.push_back("relationships");
+					entry["has"] = has;
+
+					// What's missing
+					json missing = json::array();
+					std::set<std::string> hasSet;
+					if (htIt != hasTypes.end()) hasSet = htIt->second;
+					for (const auto &ft : allFactTypes) {
+						if (hasSet.find(ft) == hasSet.end()) missing.push_back(ft);
+					}
+					if (!hasForm.count(ent)) missing.push_back("form_mapping");
+					if (!hasGloss.count(ent)) missing.push_back("glossary");
+					entry["missing"] = missing;
+
+					// Relationship count
+					int rc = relCountMap.count(ent) ? relCountMap[ent] : 0;
+					entry["relationship_count"] = rc;
+
+					// Completeness score (0-100)
+					int maxItems = (int)allFactTypes.size() + 2 + 1; // fact types + form + glossary + relationships
+					int hasCount = (int)has.size();
+					int completeness = (int)(100.0 * hasCount / maxItems);
+					entry["completeness"] = completeness;
+
+					// Suggested actions
+					json actions = json::array();
+					if (hasSet.find("schema") == hasSet.end()) {
+						actions.push_back(json{
+							{"tool", "dbmcp:get_table_schema"},
+							{"params", json{{"table", ent}}},
+							{"reason", "Schema not documented"}
+						});
+					}
+					if (rc == 0) {
+						actions.push_back(json{
+							{"tool", "dbmcp:get_table_relations"},
+							{"params", json{{"table_name", ent}}},
+							{"reason", "No relationships saved - FK info missing"}
+						});
+					}
+					if (!hasForm.count(ent)) {
+						actions.push_back(json{
+							{"tool", "Grep"},
+							{"params", json{{"pattern", "C" + ent + "Dlg"}, {"glob", "*.h"}}},
+							{"reason", "Find form/dialog class"}
+						});
+					}
+					if (hasSet.find("business_rule") == hasSet.end()) {
+						actions.push_back(json{
+							{"tool", "Grep"},
+							{"params", json{{"pattern", ent}, {"glob", "*.cpp"}}},
+							{"reason", "Find business rules in code"}
+						});
+					}
+					entry["suggested_actions"] = actions;
+
+					result[ent] = entry;
+				}
+
+				json resp = {
+					{"gaps", result},
+					{"count", (int)entities.size()}
+				};
+				if (!fedLog.empty())
+					resp["federation_log"] = fedLog;
+				return TMcpToolResult::Success(resp);
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 37. quality_report — global or per-entity knowledge metrics
+	//=======================================================================
+	tools.push_back({
+		"quality_report",
+		"Get knowledge quality metrics. Without parameters: global stats (entity count, fact count, "
+		"coverage distribution, stale entities, confidence breakdown). With entity: per-entity detailed report. "
+		"Set auto_stale=false to skip auto-marking entities not updated in 30+ days as needs_review.",
+		TMcpToolSchema()
+			.AddString("entity", "Optional: get report for specific entity")
+			.AddBoolean("auto_stale", "Auto-mark stale entities as needs_review (default: true in global mode)"),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			std::string entity = GetStr(args, "entity");
+			bool autoStale = true;  // auto-stale in global mode by default
+			if (args.contains("auto_stale") && !args["auto_stale"].is_null())
+				autoStale = args["auto_stale"].get<bool>();
+
+			try {
+				if (!entity.empty()) {
+					// Per-entity report
+					Params p;
+					p["entity"] = entity;
+
+					json facts = db->Query("SELECT fact_type, COUNT(*) as cnt FROM facts WHERE entity = :entity GROUP BY fact_type", p);
+					json relOut = db->Query("SELECT COUNT(*) as cnt FROM relationships WHERE entity_from = :entity", p);
+					json relIn = db->Query("SELECT COUNT(*) as cnt FROM relationships WHERE entity_to = :entity", p);
+					json status = db->Query("SELECT coverage, notes, updated_at FROM entity_status WHERE entity = :entity", p);
+					json form = db->Query("SELECT template FROM form_table_map WHERE main_table = :entity", p);
+					json gloss = db->Query("SELECT term FROM glossary WHERE entity = :entity", p);
+					json lastFact = db->Query("SELECT MAX(updated_at) as last_upd FROM facts WHERE entity = :entity", p);
+
+					json resp;
+					resp["entity"] = entity;
+
+					// Coverage
+					std::string cov = "unknown";
+					if (!status.empty()) {
+						cov = status[0].value("coverage", std::string("unknown"));
+						resp["notes"] = status[0].value("notes", std::string());
+						resp["status_updated"] = status[0].value("updated_at", std::string());
+					}
+					resp["coverage"] = cov;
+
+					// Facts by type
+					json factsByType;
+					int totalFacts = 0;
+					for (const auto &r : facts) {
+						std::string ft = r.value("fact_type", std::string());
+						int cnt = (int)r.value("cnt", (long long)0);
+						factsByType[ft] = cnt;
+						totalFacts += cnt;
+					}
+					resp["facts_by_type"] = factsByType;
+					resp["total_facts"] = totalFacts;
+
+					// Relationships
+					int ro = relOut.empty() ? 0 : (int)relOut[0].value("cnt", (long long)0);
+					int ri = relIn.empty() ? 0 : (int)relIn[0].value("cnt", (long long)0);
+					resp["relationships"] = json{{"outgoing", ro}, {"incoming", ri}};
+
+					resp["has_form"] = !form.empty();
+					resp["has_glossary"] = !gloss.empty();
+
+					// Last updated
+					std::string lastUpd;
+					if (!lastFact.empty())
+						lastUpd = lastFact[0].value("last_upd", std::string());
+					resp["last_updated"] = lastUpd;
+
+					// Completeness
+					int items = 0;
+					if (totalFacts > 0) items++;
+					if (ro + ri > 0) items++;
+					if (!form.empty()) items++;
+					if (!gloss.empty()) items++;
+					std::set<std::string> ftSet;
+					for (const auto &r : facts) ftSet.insert(r.value("fact_type", std::string()));
+					items += (int)ftSet.size();
+					int maxItems = 9; // 6 fact types + form + glossary + relationships
+					resp["completeness_score"] = (int)(100.0 * items / maxItems);
+
+					return TMcpToolResult::Success(resp);
+				}
+
+				// Global report
+				auto safeQ = [db](const std::string &sql) -> json {
+					try { return db->Query(sql, {}); }
+					catch (...) { return json::array(); }
+				};
+
+				json entCount = safeQ("SELECT COUNT(DISTINCT entity) as cnt FROM facts");
+				json factCount = safeQ("SELECT COUNT(*) as cnt FROM facts");
+				json relCount = safeQ("SELECT COUNT(*) as cnt FROM relationships");
+				json covDist = safeQ("SELECT coverage, COUNT(*) as cnt FROM entity_status GROUP BY coverage");
+				json confDist = safeQ("SELECT confidence, COUNT(*) as cnt FROM facts GROUP BY confidence");
+				json orphans = safeQ(
+					"SELECT COUNT(DISTINCT f.entity) as cnt FROM facts f "
+					"LEFT JOIN entity_status es ON f.entity = es.entity "
+					"WHERE es.entity IS NULL");
+				json gaps = safeQ("SELECT COUNT(*) as cnt FROM search_gaps WHERE resolved = 0");
+
+				// Auto-mark stale entities (>30 days since last update, coverage IN full/partial)
+				int staleCount = 0;
+				if (autoStale) {
+					try {
+						staleCount = db->Execute(
+							"UPDATE entity_status SET coverage = 'needs_review', "
+							"  notes = COALESCE(notes,'') || ' | Auto-stale: ' || datetime('now'), "
+							"  updated_at = datetime('now') "
+							"WHERE entity IN ("
+							"  SELECT entity FROM facts GROUP BY entity "
+							"  HAVING CAST(julianday('now') - julianday(MAX(updated_at)) AS INTEGER) > 30"
+							") AND coverage IN ('full', 'partial')", {});
+					} catch (...) {}
+				}
+
+				// Coverage map
+				json covMap;
+				for (const auto &r : covDist) {
+					std::string c = r.value("coverage", std::string("unknown"));
+					covMap[c] = r.value("cnt", (long long)0);
+				}
+
+				// Confidence map
+				json confMap;
+				for (const auto &r : confDist) {
+					std::string c = r.value("confidence", std::string("unverified"));
+					confMap[c] = r.value("cnt", (long long)0);
+				}
+
+				json resp;
+				resp["total_entities"] = entCount.empty() ? 0 : entCount[0].value("cnt", (long long)0);
+				resp["total_facts"] = factCount.empty() ? 0 : factCount[0].value("cnt", (long long)0);
+				resp["total_relationships"] = relCount.empty() ? 0 : relCount[0].value("cnt", (long long)0);
+				resp["coverage_distribution"] = covMap;
+				resp["confidence_distribution"] = confMap;
+				resp["orphan_entities"] = orphans.empty() ? 0 : orphans[0].value("cnt", (long long)0);
+				resp["unresolved_gaps"] = gaps.empty() ? 0 : gaps[0].value("cnt", (long long)0);
+				resp["stale_auto_marked"] = staleCount;
+
+				return TMcpToolResult::Success(resp);
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 38. get_knowledge_gaps — unresolved search gaps
+	//=======================================================================
+	tools.push_back({
+		"get_knowledge_gaps",
+		"Get unresolved knowledge gaps - queries that returned zero results. "
+		"Shows what information users searched for but couldn't find. "
+		"Use to prioritize knowledge collection.",
+		TMcpToolSchema()
+			.AddInteger("limit", "Max gaps to return (default 20)"),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			int limit = GetInt(args, "limit", 20);
+			if (limit < 1) limit = 1;
+			if (limit > 100) limit = 100;
+
+			try {
+				Params p;
+				p["limit"] = std::to_string(limit);
+
+				json rows = db->Query(
+					"SELECT query_text, tool_name, COUNT(*) as ask_count, "
+					"  MIN(created_at) as first_asked, MAX(created_at) as last_asked "
+					"FROM search_gaps WHERE resolved = 0 "
+					"GROUP BY query_text, tool_name "
+					"ORDER BY ask_count DESC, last_asked DESC LIMIT :limit", p);
+
+				json totalRow = db->Query("SELECT COUNT(*) as cnt FROM search_gaps WHERE resolved = 0", {});
+				int total = totalRow.empty() ? 0 : (int)totalRow[0].value("cnt", (long long)0);
+
+				return TMcpToolResult::Success(json{
+					{"gaps", rows},
+					{"count", (int)rows.size()},
+					{"total_unresolved", total}
+				});
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 39. context_feedback — track useful/useless entities
+	//=======================================================================
+	tools.push_back({
+		"context_feedback",
+		"Provide feedback on which entities were useful or useless for a task. "
+		"Used to improve future context relevance via boosting/penalizing.",
+		TMcpToolSchema()
+			.AddString("task_text", "Description of the task")
+			.AddString("useful_entities", "JSON array of entity names that were useful")
+			.AddString("useless_entities", "JSON array of entity names that were not useful"),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			std::string taskText = GetStr(args, "task_text");
+			json useful = GetArray(args, "useful_entities");
+			json useless = GetArray(args, "useless_entities");
+
+			if (useful.empty() && useless.empty())
+				return TMcpToolResult::Error("Provide at least useful_entities or useless_entities");
+
+			try {
+				db->BeginTransaction();
+				int count = 0;
+				Params p;
+				p["task"] = taskText;
+
+				for (const auto &e : useful) {
+					if (!e.is_string()) continue;
+					p["entity"] = e.get<std::string>();
+					db->Execute(
+						"INSERT INTO context_feedback(task_text, entity, useful) VALUES(:task, :entity, 1)", p);
+					count++;
+				}
+				for (const auto &e : useless) {
+					if (!e.is_string()) continue;
+					p["entity"] = e.get<std::string>();
+					db->Execute(
+						"INSERT INTO context_feedback(task_text, entity, useful) VALUES(:task, :entity, 0)", p);
+					count++;
+				}
+				db->Commit();
+
+				return TMcpToolResult::Success(json{
+					{"success", true},
+					{"saved", count},
+					{"message", "Saved " + std::to_string(count) + " feedback entries"}
+				});
+			} catch (const std::exception &e) {
+				try { db->Rollback(); } catch (...) {}
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 40. prepare_context — one call = full context for a task
+	//=======================================================================
+	tools.push_back({
+		"prepare_context",
+		"One call = full task context. Extracts keywords from task description, expands synonyms, "
+		"searches ALL knowledge stores (FTS + LIKE), ranks entities by relevance, enriches top entities "
+		"with facts/relationships/forms, identifies gaps with suggested actions. "
+		"Returns structured brief ready for the agent to use.",
+		TMcpToolSchema()
+			.AddString("task_description", "Description of the task to prepare context for", true)
+			.AddInteger("max_entities", "Max entities to return (default 10)")
+			.AddBoolean("include_code_search", "Include suggested code search actions in gaps (default true)"),
+		[db, fedClient](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			std::string task = GetStr(args, "task_description");
+			if (task.empty())
+				return TMcpToolResult::Error("Missing required parameter: task_description");
+
+			int maxEnt = GetInt(args, "max_entities", 10);
+			if (maxEnt < 1) maxEnt = 1;
+			if (maxEnt > 30) maxEnt = 30;
+
+			try {
+				// === STEP 1: Keyword extraction + synonym expansion ===
+				auto words = SplitWordsFiltered(task, db);
+				if (words.empty()) words.push_back(task);
+				if (words.size() > 7) words.resize(7);
+
+				// Synonym expansion from glossary
+				std::vector<std::string> expandedWords = words;
+				for (const auto &w : words) {
+					std::string wLike = "%" + w + "%";
+					Params sp;
+					sp["wlike"] = wLike;
+					try {
+						json synRows = db->Query(
+							"SELECT synonyms FROM glossary WHERE term LIKE :wlike OR synonyms LIKE :wlike LIMIT 3", sp);
+						for (const auto &sr : synRows) {
+							std::string syns = sr.value("synonyms", std::string());
+							try {
+								json synArr = json::parse(syns);
+								if (synArr.is_array()) {
+									for (const auto &syn : synArr) {
+										if (syn.is_string()) {
+											std::string s = syn.get<std::string>();
+											if (s.length() >= 3 && expandedWords.size() < 15)
+												expandedWords.push_back(s);
+										}
+									}
+								}
+							} catch (...) {}
+						}
+					} catch (...) {}
+				}
+
+				// Build FTS query from expanded words
+				std::string ftsQuery;
+				for (const auto &w : expandedWords) {
+					if (!ftsQuery.empty()) ftsQuery += " OR ";
+					ftsQuery += AddWildcard(w);
+				}
+
+				Params p;
+				p["query"] = ftsQuery;
+
+				// Build per-word LIKE patterns
+				std::string factLike, glossLike, procLike, formLike, relLike, queryLike, patternLike, taskLike;
+				for (size_t i = 0; i < words.size() && i < 5; i++) {
+					std::string pn = "lw" + std::to_string(i);
+					p[pn] = MakeLikePattern(words[i]);
+					std::string sep = (i > 0) ? " OR " : "";
+					factLike += sep + "f.description LIKE :" + pn + " OR f.entity LIKE :" + pn;
+					glossLike += sep + "g.term LIKE :" + pn + " OR g.context LIKE :" + pn;
+					procLike += sep + "bp.name LIKE :" + pn + " OR bp.description LIKE :" + pn;
+					formLike += sep + "fm.template LIKE :" + pn + " OR fm.class_name LIKE :" + pn
+						+ " OR fm.main_table LIKE :" + pn;
+					relLike += sep + "r.entity_from LIKE :" + pn + " OR r.entity_to LIKE :" + pn;
+					queryLike += sep + "vq.purpose LIKE :" + pn + " OR vq.notes LIKE :" + pn;
+					patternLike += sep + "cp.pattern_name LIKE :" + pn + " OR cp.description LIKE :" + pn;
+					taskLike += sep + "ct.title LIKE :" + pn + " OR ct.description LIKE :" + pn;
+				}
+
+				// === STEP 2: Parallel FTS+LIKE search across all stores ===
+				json factMatches = RankedSearch(db, p,
+					"SELECT f.id, f.entity, f.fact_type, f.description, f.confidence "
+					"FROM facts f INNER JOIN facts_fts fts ON f.id = fts.rowid "
+					"WHERE facts_fts MATCH :query ORDER BY fts.rank LIMIT 20",
+					"SELECT f.id, f.entity, f.fact_type, f.description, f.confidence "
+					"FROM facts f WHERE " + factLike + " LIMIT 20", 20);
+
+				json glossMatches = RankedSearch(db, p,
+					"SELECT g.* FROM glossary g INNER JOIN glossary_fts fts ON g.id = fts.rowid "
+					"WHERE glossary_fts MATCH :query ORDER BY fts.rank LIMIT 5",
+					"SELECT g.* FROM glossary g WHERE " + glossLike + " LIMIT 5", 5);
+
+				json procMatches = RankedSearch(db, p,
+					"SELECT bp.id, bp.name, bp.related_entities FROM business_processes bp "
+					"INNER JOIN processes_fts fts ON bp.id = fts.rowid "
+					"WHERE processes_fts MATCH :query ORDER BY fts.rank LIMIT 5",
+					"SELECT bp.id, bp.name, bp.related_entities FROM business_processes bp WHERE "
+					+ procLike + " LIMIT 5", 5);
+
+				json queryMatches = RankedSearch(db, p,
+					"SELECT vq.id, vq.purpose, vq.sql_text, vq.notes FROM verified_queries vq "
+					"INNER JOIN queries_fts fts ON vq.id = fts.rowid "
+					"WHERE queries_fts MATCH :query ORDER BY fts.rank LIMIT 5",
+					"SELECT vq.id, vq.purpose, vq.sql_text, vq.notes FROM verified_queries vq WHERE "
+					+ queryLike + " LIMIT 5", 5);
+
+				json patternMatches = RankedSearch(db, p,
+					"SELECT cp.id, cp.pattern_name, cp.description FROM code_patterns cp "
+					"INNER JOIN patterns_fts fts ON cp.id = fts.rowid "
+					"WHERE patterns_fts MATCH :query ORDER BY fts.rank LIMIT 3",
+					"SELECT cp.id, cp.pattern_name, cp.description FROM code_patterns cp WHERE "
+					+ patternLike + " LIMIT 3", 3);
+
+				json formMatches = json::array();
+				try { formMatches = db->Query(
+					"SELECT * FROM form_table_map fm WHERE " + formLike + " LIMIT 5", p);
+				} catch (...) {}
+
+				json relMatches = json::array();
+				try { relMatches = db->Query(
+					"SELECT * FROM relationships r WHERE " + relLike + " LIMIT 15", p);
+				} catch (...) {}
+
+				json taskMatches = json::array();
+				try {
+					taskMatches = RankedSearch(db, p,
+						"SELECT ct.id, ct.title, ct.created_at FROM completed_tasks ct "
+						"INNER JOIN tasks_fts fts ON ct.id = fts.rowid "
+						"WHERE tasks_fts MATCH :query ORDER BY fts.rank LIMIT 5",
+						"SELECT ct.id, ct.title, ct.created_at FROM completed_tasks ct WHERE "
+						+ taskLike + " LIMIT 5", 5);
+				} catch (...) {}
+
+				// === STEP 3: Entity extraction + ranking ===
+				std::map<std::string, int> entScores;
+				std::map<std::string, std::set<std::string>> entSources;
+
+				// Facts: +2 per match
+				for (const auto &r : factMatches) {
+					std::string e = r.value("entity", std::string());
+					if (!e.empty()) { entScores[e] += 2; entSources[e].insert("facts"); }
+				}
+				// Glossary: +3 (high-value match)
+				for (const auto &r : glossMatches) {
+					std::string e = r.value("entity", std::string());
+					if (!e.empty()) { entScores[e] += 3; entSources[e].insert("glossary"); }
+				}
+				// Forms: +3
+				for (const auto &r : formMatches) {
+					std::string mt = r.value("main_table", std::string());
+					if (!mt.empty()) { entScores[mt] += 3; entSources[mt].insert("forms"); }
+				}
+				// Processes: +1 per related entity
+				for (const auto &r : procMatches) {
+					try {
+						json arr = json::parse(r.value("related_entities", std::string()));
+						if (arr.is_array())
+							for (const auto &item : arr)
+								if (item.is_string()) {
+									std::string e = item.get<std::string>();
+									entScores[e] += 1;
+									entSources[e].insert("processes");
+								}
+					} catch (...) {}
+				}
+				// Relationships: +1 per entity
+				for (const auto &r : relMatches) {
+					std::string ef = r.value("entity_from", std::string());
+					std::string et = r.value("entity_to", std::string());
+					if (!ef.empty()) { entScores[ef] += 1; entSources[ef].insert("relationships"); }
+					if (!et.empty()) { entScores[et] += 1; entSources[et].insert("relationships"); }
+				}
+
+				// Apply feedback boosting
+				if (!entScores.empty()) {
+					try {
+						json fb = db->Query(
+							"SELECT entity, "
+							"  SUM(CASE WHEN useful=1 THEN 1 ELSE 0 END) as pos, "
+							"  SUM(CASE WHEN useful=0 THEN 1 ELSE 0 END) as neg "
+							"FROM context_feedback GROUP BY entity HAVING COUNT(*) >= 3", {});
+						for (const auto &r : fb) {
+							std::string e = r.value("entity", std::string());
+							int pos = (int)r.value("pos", (long long)0);
+							int neg = (int)r.value("neg", (long long)0);
+							if (entScores.count(e) && (pos + neg) > 0) {
+								double ratio = (double)pos / (pos + neg);
+								// Boost useful entities, penalize useless
+								double factor = 0.5 + 0.5 * ratio; // range: 0.5 - 1.0
+								entScores[e] = (int)(entScores[e] * factor);
+								if (entScores[e] < 1) entScores[e] = 1;
+							}
+						}
+					} catch (...) {}
+				}
+
+				// Rank and take top N
+				std::vector<std::pair<std::string, int>> ranked(entScores.begin(), entScores.end());
+				std::sort(ranked.begin(), ranked.end(),
+					[](const std::pair<std::string,int> &a, const std::pair<std::string,int> &b) {
+						return a.second > b.second;
+					});
+				if ((int)ranked.size() > maxEnt) ranked.resize(maxEnt);
+
+				// === STEP 4: Batch enrichment ===
+				json entityBriefs = json::array();
+				if (!ranked.empty()) {
+					std::string inC = "(";
+					for (size_t i = 0; i < ranked.size(); i++) {
+						if (i > 0) inC += ",";
+						inC += "'" + EscapeSqlString(ranked[i].first) + "'";
+					}
+					inC += ")";
+
+					auto safeQ = [db](const std::string &sql) -> json {
+						try { return db->Query(sql, {}); }
+						catch (...) { return json::array(); }
+					};
+
+					json stRows = safeQ("SELECT entity, coverage FROM entity_status WHERE entity IN " + inC);
+					json fcRows = safeQ("SELECT entity, fact_type, COUNT(*) as cnt FROM facts WHERE entity IN "
+						+ inC + " GROUP BY entity, fact_type");
+					json rcRows = safeQ(
+						"SELECT entity_from as entity, COUNT(*) as cnt "
+						"FROM relationships WHERE entity_from IN " + inC + " GROUP BY entity_from "
+						"UNION ALL "
+						"SELECT entity_to as entity, COUNT(*) as cnt "
+						"FROM relationships WHERE entity_to IN " + inC + " GROUP BY entity_to");
+					json frRows = safeQ("SELECT template, class_name, file_path, main_table "
+						"FROM form_table_map WHERE main_table IN " + inC);
+
+					// Build lookup maps
+					std::map<std::string, std::string> covMap;
+					std::map<std::string, json> ftMap;
+					std::map<std::string, int> relMap;
+					std::map<std::string, json> frmMap;
+
+					for (const auto &r : stRows)
+						covMap[r.value("entity", std::string())] = r.value("coverage", std::string());
+					for (const auto &r : fcRows) {
+						std::string e = r.value("entity", std::string());
+						std::string ft = r.value("fact_type", std::string());
+						ftMap[e][ft] = r.value("cnt", (long long)0);
+					}
+					for (const auto &r : rcRows) {
+						std::string e = r.value("entity", std::string());
+						relMap[e] += (int)r.value("cnt", (long long)0);
+					}
+					for (const auto &r : frRows) {
+						std::string mt = r.value("main_table", std::string());
+						frmMap[mt] = json{
+							{"class_name", r.value("class_name", std::string())},
+							{"file_path", r.value("file_path", std::string())}
+						};
+					}
+
+					for (const auto &re : ranked) {
+						const std::string &ent = re.first;
+						json brief;
+						brief["name"] = ent;
+						brief["relevance"] = re.second;
+						brief["coverage"] = covMap.count(ent) ? covMap[ent] : "unknown";
+
+						if (ftMap.count(ent)) {
+							brief["fact_counts"] = ftMap[ent];
+							int total = 0;
+							for (auto it = ftMap[ent].begin(); it != ftMap[ent].end(); ++it)
+								if (it.value().is_number()) total += it.value().get<int>();
+							brief["total_facts"] = total;
+						} else {
+							brief["total_facts"] = 0;
+						}
+
+						brief["rel_count"] = relMap.count(ent) ? relMap[ent] : 0;
+						if (frmMap.count(ent)) brief["form"] = frmMap[ent];
+
+						// Completeness %
+						int items = 0;
+						if (ftMap.count(ent)) items += (int)ftMap[ent].size();
+						if (relMap.count(ent) && relMap[ent] > 0) items++;
+						if (frmMap.count(ent)) items++;
+						brief["completeness"] = (int)(100.0 * items / 9);
+
+						entityBriefs.push_back(brief);
+					}
+				}
+
+				// === STEP 4.5: Federation — auto-fetch from dbmcp ===
+				json fedLog = json::array();
+				int dbmcpCalls = 0;
+				if (fedClient) {
+					int fedCount = 0;
+					for (size_t bi = 0; bi < entityBriefs.size() && fedCount < 3; bi++) {
+						auto &eb = entityBriefs[bi];
+						std::string ent = eb.value("name", std::string());
+						std::string cov = eb.value("coverage", std::string("unknown"));
+						bool hasSchema = eb.contains("fact_counts") && eb["fact_counts"].contains("schema");
+
+						if (cov == "unknown" && !hasSchema) {
+							std::string fedErr;
+							bool ok = FederateEntity(db, fedClient, ent, &fedErr);
+							if (ok) {
+								dbmcpCalls += 2; // schema + relations calls
+								json logEntry = {{"entity", ent}, {"status", "fetched"}};
+								if (!fedErr.empty()) logEntry["schema_error"] = fedErr;
+								fedLog.push_back(logEntry);
+								fedCount++;
+
+								// Re-enrich this entity's brief from SQLite
+								LocalMcpDb::Params rp;
+								rp["ent"] = ent;
+								eb["coverage"] = "schema_only";
+								try {
+									json fc = db->Query(
+										"SELECT fact_type, COUNT(*) as cnt FROM facts "
+										"WHERE entity = :ent GROUP BY fact_type", rp);
+									json ftCounts;
+									int total = 0;
+									for (const auto &r : fc) {
+										std::string ft = r.value("fact_type", std::string());
+										int cnt = (int)r.value("cnt", (long long)0);
+										ftCounts[ft] = cnt;
+										total += cnt;
+									}
+									eb["fact_counts"] = ftCounts;
+									eb["total_facts"] = total;
+								} catch (...) {}
+								try {
+									json rc = db->Query(
+										"SELECT COUNT(*) as cnt FROM relationships "
+										"WHERE entity_from = :ent OR entity_to = :ent", rp);
+									if (!rc.empty())
+										eb["rel_count"] = (int)rc[0].value("cnt", (long long)0);
+								} catch (...) {}
+								// Recalculate completeness
+								int items = 0;
+								if (eb.contains("fact_counts")) items += (int)eb["fact_counts"].size();
+								if (eb.value("rel_count", 0) > 0) items++;
+								if (eb.contains("form")) items++;
+								eb["completeness"] = (int)(100.0 * items / 9);
+							}
+						}
+					}
+				}
+
+				// === STEP 5: Gap identification ===
+				json gaps = json::array();
+				for (const auto &eb : entityBriefs) {
+					std::string ent = eb.value("name", std::string());
+					std::string cov = eb.value("coverage", std::string("unknown"));
+					int comp = eb.value("completeness", 0);
+
+					if (comp < 50 || cov == "unknown" || cov == "schema_only") {
+						json gap;
+						gap["entity"] = ent;
+						gap["coverage"] = cov;
+						gap["completeness"] = comp;
+
+						json actions = json::array();
+						bool hasSchema = false;
+						if (eb.contains("fact_counts") && eb["fact_counts"].contains("schema"))
+							hasSchema = true;
+
+						if (!hasSchema) {
+							actions.push_back(json{
+								{"tool", "dbmcp:get_table_schema"},
+								{"params", json{{"table", ent}}},
+								{"reason", "Schema not in PM"}
+							});
+						}
+						int rc = eb.value("rel_count", 0);
+						if (rc == 0) {
+							actions.push_back(json{
+								{"tool", "dbmcp:get_table_relations"},
+								{"params", json{{"table_name", ent}}},
+								{"reason", "No FK relationships saved"}
+							});
+						}
+						if (!eb.contains("form")) {
+							actions.push_back(json{
+								{"tool", "Grep"},
+								{"params", json{{"pattern", ent}, {"glob", "*.h"}}},
+								{"reason", "Find form/dialog class"}
+							});
+						}
+						gap["suggested_actions"] = actions;
+						gaps.push_back(gap);
+					}
+				}
+
+				// === STEP 6: Compact summaries for non-entity results ===
+				// Relevant facts (top 15 from FTS)
+				json relevantFacts = json::array();
+				for (size_t i = 0; i < factMatches.size() && i < 15; i++) {
+					const auto &f = factMatches[i];
+					relevantFacts.push_back(json{
+						{"id", f.value("id", (long long)0)},
+						{"entity", f.value("entity", std::string())},
+						{"type", f.value("fact_type", std::string())},
+						{"description", f.value("description", std::string())},
+						{"confidence", f.value("confidence", std::string())}
+					});
+				}
+
+				// Process summaries
+				json procSummary = json::array();
+				for (const auto &r : procMatches) {
+					procSummary.push_back(json{
+						{"id", r.value("id", (long long)0)},
+						{"name", r.value("name", std::string())}
+					});
+				}
+
+				// Query summaries (with SQL preview)
+				json querySummary = json::array();
+				for (const auto &r : queryMatches) {
+					std::string sql = r.value("sql_text", std::string());
+					// Truncate SQL to ~200 chars
+					if (sql.size() > 200) sql = TruncateUtf8(sql, 200);
+					querySummary.push_back(json{
+						{"id", r.value("id", (long long)0)},
+						{"purpose", r.value("purpose", std::string())},
+						{"sql_preview", sql}
+					});
+				}
+
+				// Pattern summaries
+				json patternSummary = json::array();
+				for (const auto &r : patternMatches) {
+					std::string desc = r.value("description", std::string());
+					if (desc.size() > 150) desc = TruncateUtf8(desc, 150);
+					patternSummary.push_back(json{
+						{"name", r.value("pattern_name", std::string())},
+						{"description", desc}
+					});
+				}
+
+				// Similar tasks
+				json taskSummary = json::array();
+				for (const auto &r : taskMatches) {
+					taskSummary.push_back(json{
+						{"id", r.value("id", (long long)0)},
+						{"title", r.value("title", std::string())},
+						{"date", r.value("created_at", std::string())}
+					});
+				}
+
+				// Relationship pairs
+				json relPairs = json::array();
+				for (const auto &r : relMatches) {
+					relPairs.push_back(json{
+						{"from", r.value("entity_from", std::string())},
+						{"to", r.value("entity_to", std::string())},
+						{"type", r.value("rel_type", std::string())}
+					});
+				}
+
+				// === STEP 7: Build response ===
+				json resp;
+				resp["task_summary"] = task;
+				resp["keywords"] = json(words);
+				resp["entities"] = entityBriefs;
+				resp["relevant_facts"] = relevantFacts;
+				resp["relationships"] = relPairs;
+				resp["forms"] = formMatches;
+				resp["processes"] = procSummary;
+				resp["queries"] = querySummary;
+				resp["patterns"] = patternSummary;
+				resp["similar_tasks"] = taskSummary;
+				resp["gaps"] = gaps;
+				if (!fedLog.empty())
+					resp["federation_log"] = fedLog;
+				int pmQueries = 5 + 2; // 5 RankedSearch (FTS+LIKE each = 2 queries × 5 = 10, counted as 5) + 2 direct queries (forms, rels)
+				if (!taskMatches.empty() || !taskLike.empty()) pmQueries++; // tasks search
+				if (!ranked.empty()) pmQueries += 4; // enrichment: status + facts + rels + forms
+				resp["stats"] = json{
+					{"pm_queries", pmQueries},
+					{"dbmcp_calls", dbmcpCalls},
+					{"entities_found", (int)ranked.size()},
+					{"gaps_found", (int)gaps.size()},
+					{"keywords_used", (int)words.size()},
+					{"synonyms_expanded", (int)(expandedWords.size() - words.size())}
+				};
+
 				return TMcpToolResult::Success(resp);
 			} catch (const std::exception &e) {
 				return TMcpToolResult::Error(e.what());

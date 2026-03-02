@@ -408,6 +408,44 @@ inline void InitializeProjectMemorySchema(LocalMcpDb *db)
 		"END;"
 	);
 
+	// Search gaps — track unsuccessful searches for knowledge gap detection
+	db->Exec(
+		"CREATE TABLE IF NOT EXISTS search_gaps ("
+		"  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+		"  query_text TEXT NOT NULL,"
+		"  tool_name TEXT NOT NULL,"
+		"  result_count INTEGER DEFAULT 0,"
+		"  resolved INTEGER DEFAULT 0,"
+		"  resolved_by TEXT,"
+		"  created_at TEXT DEFAULT (datetime('now')),"
+		"  resolved_at TEXT"
+		");"
+		"CREATE INDEX IF NOT EXISTS idx_sg_resolved ON search_gaps(resolved);"
+	);
+
+	// Context feedback — track which entities were useful/useless in context
+	db->Exec(
+		"CREATE TABLE IF NOT EXISTS context_feedback ("
+		"  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+		"  task_text TEXT,"
+		"  entity TEXT NOT NULL,"
+		"  useful INTEGER NOT NULL DEFAULT 1,"
+		"  created_at TEXT DEFAULT (datetime('now'))"
+		");"
+		"CREATE INDEX IF NOT EXISTS idx_cf_entity ON context_feedback(entity);"
+	);
+
+	// Fact history — track changes to facts for audit trail
+	db->Exec(
+		"CREATE TABLE IF NOT EXISTS fact_history ("
+		"  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+		"  fact_id INTEGER NOT NULL,"
+		"  old_description TEXT,"
+		"  new_description TEXT,"
+		"  changed_at TEXT DEFAULT (datetime('now'))"
+		");"
+	);
+
 	// UI research — code investigation results (UPSERT by form_class)
 	db->Exec(
 		"CREATE TABLE IF NOT EXISTS ui_research ("
