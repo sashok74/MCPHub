@@ -1,0 +1,46 @@
+{
+  "modules": [
+    {
+      "typeId": "db_mcp",
+      "instanceId": "db_dev",
+      "displayName": "My Database (DEV)",
+      "autoStart": true,
+      "config": {
+        "mcp_port": 8080,
+        "provider": "MSSQL",
+        "server": "localhost",
+        "port": 1433,
+        "database": "MyDatabase",
+        "username": "sa",
+        "password": "your_password_here",
+        "charset": "UTF8",
+        "local_db_path": "C:\\MCPHub\\data\\db_mcp_dev.db"
+      }
+    },
+    {
+      "typeId": "project_memory",
+      "instanceId": "pm_main",
+      "displayName": "Project Memory",
+      "autoStart": true,
+      "config": {
+        "mcp_port": 8766,
+        "db_path": "C:\\MCPHub\\data\\project_memory.db"
+      }
+    },
+    {
+      "typeId": "merp_helper",
+      "instanceId": "helper_dev",
+      "displayName": "SQL Helper (DEV)",
+      "autoStart": false,
+      "config": {
+        "mcp_port": 8090,
+        "server": "localhost",
+        "database": "MyDatabase",
+        "username": "sa",
+        "password": "your_password_here",
+        "local_db_path": "C:\\MCPHub\\data\\helper.db",
+        "output_dir": "C:\\MCPHub\\generated"
+      }
+    }
+  ]
+}

@@ -19,6 +19,7 @@
 #include <set>
 #include <map>
 #include <algorithm>
+#include <stdexcept>
 
 namespace Mcp { namespace Tools {
 
@@ -156,13 +157,30 @@ inline std::string MakeLikePattern(const std::string &query)
 //---------------------------------------------------------------------------
 inline std::vector<std::string> SplitWords(const std::string &query)
 {
-	std::istringstream iss(query);
-	std::string word;
 	std::vector<std::string> words;
-	while (iss >> word) {
-		if (word.length() >= 3) // skip very short tokens
-			words.push_back(word);
+	std::string current;
+
+	auto flushToken = [&]() {
+		if (current.length() >= 3) // skip very short tokens
+			words.push_back(current);
+		current.clear();
+	};
+
+	for (size_t i = 0; i < query.size(); i++) {
+		unsigned char c = static_cast<unsigned char>(query[i]);
+		bool isDelimiter = false;
+		if (c < 0x80) {
+			isDelimiter = std::isspace(c) || (std::ispunct(c) && c != '_' && c != '#');
+		}
+
+		if (isDelimiter) {
+			flushToken();
+			continue;
+		}
+
+		current += query[i];
 	}
+	flushToken();
 	return words;
 }
 
@@ -340,6 +358,124 @@ inline std::string EscapeSqlString(const std::string &s)
 		else result += c;
 	}
 	return result;
+}
+
+//---------------------------------------------------------------------------
+// Helper: normalize text for duplicate detection / comparison
+//---------------------------------------------------------------------------
+inline std::string NormalizeTextKey(const std::string &s)
+{
+	std::string lower = Utf8Lower(s);
+	std::string result;
+	result.reserve(lower.size());
+
+	bool prevSpace = true;
+	for (size_t i = 0; i < lower.size(); i++) {
+		unsigned char c = static_cast<unsigned char>(lower[i]);
+		if (c < 0x80 && std::isspace(c)) {
+			if (!prevSpace) {
+				result += ' ';
+				prevSpace = true;
+			}
+			continue;
+		}
+		result += lower[i];
+		prevSpace = false;
+	}
+
+	if (!result.empty() && result.back() == ' ')
+		result.pop_back();
+
+	return result;
+}
+
+//---------------------------------------------------------------------------
+// Helper: case-insensitive contains / equality
+//---------------------------------------------------------------------------
+inline bool ContainsCi(const std::string &haystack, const std::string &needle)
+{
+	if (haystack.empty() || needle.empty())
+		return false;
+	return Utf8Lower(haystack).find(Utf8Lower(needle)) != std::string::npos;
+}
+
+inline bool TextEqualsCi(const std::string &a, const std::string &b)
+{
+	if (a.empty() || b.empty())
+		return false;
+	return NormalizeTextKey(a) == NormalizeTextKey(b);
+}
+
+//---------------------------------------------------------------------------
+// Helper: confidence ranking / scoring
+//---------------------------------------------------------------------------
+inline int ConfidenceRank(const std::string &confidence)
+{
+	if (confidence == "verified") return 3;
+	if (confidence == "unverified") return 2;
+	if (confidence == "uncertain") return 1;
+	return 0;
+}
+
+inline std::string StrongerConfidence(const std::string &a, const std::string &b)
+{
+	return ConfidenceRank(a) >= ConfidenceRank(b) ? a : b;
+}
+
+inline int ConfidenceBonus(const std::string &confidence)
+{
+	if (confidence == "verified") return 1;
+	if (confidence == "uncertain") return -1;
+	return 0;
+}
+
+//---------------------------------------------------------------------------
+// Helper: exact / substring match bonus for entity and form identifiers
+//---------------------------------------------------------------------------
+inline int ExactMatchBonus(const std::string &query, const std::string &candidate)
+{
+	if (query.empty() || candidate.empty())
+		return 0;
+	if (TextEqualsCi(query, candidate))
+		return 8;
+	if (ContainsCi(query, candidate))
+		return 5;
+	return 0;
+}
+
+inline int BestMatchBonus(const std::string &query, const std::initializer_list<std::string> &candidates)
+{
+	int best = 0;
+	for (const auto &candidate : candidates)
+		best = std::max(best, ExactMatchBonus(query, candidate));
+	return best;
+}
+
+inline int WordMatchBonus(const std::vector<std::string> &words,
+	const std::initializer_list<std::string> &candidates)
+{
+	int best = 0;
+	for (const auto &candidate : candidates) {
+		if (candidate.empty())
+			continue;
+		for (const auto &word : words) {
+			if (word.empty())
+				continue;
+			if (TextEqualsCi(word, candidate)) {
+				best = std::max(best, 6);
+			} else if (word.length() >= 4 &&
+				(ContainsCi(candidate, word) || ContainsCi(word, candidate))) {
+				best = std::max(best, 3);
+			}
+		}
+	}
+	return best;
+}
+
+inline int QueryMatchBonus(const std::string &query, const std::vector<std::string> &words,
+	const std::initializer_list<std::string> &candidates)
+{
+	return std::max(BestMatchBonus(query, candidates), WordMatchBonus(words, candidates));
 }
 
 //---------------------------------------------------------------------------
@@ -525,16 +661,19 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 			.AddString("entity", "Entity name (e.g. table, class, module)", true)
 			.AddString("fact_type", "Fact type: schema|business_rule|gotcha|code_pattern|statistics|concrete_data|relationship", true)
 			.AddString("description", "The fact description", true)
-			.AddString("evidence", "Evidence or source for this fact")
+			.AddString("evidence", "Evidence or source for this fact", true)
 			.AddString("confidence", "Confidence level: verified|unverified|uncertain")
 			.AddString("task_context", "Task context when this fact was discovered"),
 		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
 			std::string entity = GetStr(args, "entity");
 			std::string factType = GetStr(args, "fact_type");
 			std::string description = GetStr(args, "description");
+			std::string evidence = GetStr(args, "evidence");
 
 			if (entity.empty() || factType.empty() || description.empty())
 				return TMcpToolResult::Error("Missing required parameters: entity, fact_type, description");
+			if (evidence.empty())
+				return TMcpToolResult::Error("Missing required parameter: evidence");
 
 			std::string confidence = GetStr(args, "confidence", "unverified");
 
@@ -542,11 +681,45 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 			p["entity"] = entity;
 			p["fact_type"] = factType;
 			p["description"] = description;
-			p["evidence"] = GetStr(args, "evidence");
+			p["evidence"] = evidence;
 			p["confidence"] = confidence;
 			p["task_context"] = GetStr(args, "task_context");
 
 			try {
+				Params ep;
+				ep["entity"] = entity;
+				ep["fact_type"] = factType;
+				json existing = db->Query(
+					"SELECT id, description, confidence FROM facts "
+					"WHERE entity = :entity AND fact_type = :fact_type "
+					"ORDER BY updated_at DESC LIMIT 50", ep);
+
+				for (const auto &row : existing) {
+					if (!TextEqualsCi(row.value("description", std::string()), description))
+						continue;
+
+					long long id = row.value("id", (long long)0);
+					Params up = p;
+					up["id"] = std::to_string(id);
+					up["confidence"] = StrongerConfidence(
+						row.value("confidence", std::string("unverified")), confidence);
+					db->Execute(
+						"UPDATE facts SET "
+						"  description = :description, "
+						"  evidence = :evidence, "
+						"  confidence = :confidence, "
+						"  task_context = CASE WHEN :task_context <> '' THEN :task_context ELSE task_context END, "
+						"  updated_at = datetime('now') "
+						"WHERE id = :id", up);
+
+					json resp;
+					resp["success"] = true;
+					resp["id"] = id;
+					resp["message"] = "Existing fact refreshed for entity: " + entity;
+					resp["deduplicated"] = true;
+					return TMcpToolResult::Success(resp);
+				}
+
 				db->Execute(
 					"INSERT INTO facts (entity, fact_type, description, evidence, confidence, task_context) "
 					"VALUES (:entity, :fact_type, :description, :evidence, :confidence, :task_context)", p);
@@ -764,7 +937,20 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 			}
 
 			try {
-				json rows = db->Query(sql, p);
+				json rows;
+				if (!tmpl.empty()) {
+					rows = db->Query(sql, p);
+					if (rows.empty()) {
+						Params fp;
+						fp["q"] = "%" + tmpl + "%";
+						rows = db->Query(
+							"SELECT * FROM form_table_map WHERE "
+							"template LIKE :q OR class_name LIKE :q OR file_path LIKE :q "
+							"OR main_table LIKE :q OR sql_file LIKE :q", fp);
+					}
+				} else {
+					rows = db->Query(sql, p);
+				}
 				json resp;
 				resp["forms"] = rows;
 				resp["count"] = rows.size();
@@ -801,6 +987,30 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 			p["related_entities"] = GetStr(args, "related_entities");
 
 			try {
+				Params ep;
+				ep["name"] = name;
+				json existing = db->Query(
+					"SELECT id FROM business_processes WHERE name = :name ORDER BY id DESC LIMIT 1", ep);
+				if (!existing.empty()) {
+					Params up = p;
+					up["id"] = std::to_string(existing[0].value("id", (long long)0));
+					db->Execute(
+						"UPDATE business_processes SET "
+						"  description = :description, "
+						"  steps = :steps, "
+						"  synonyms = :synonyms, "
+						"  related_entities = :related_entities, "
+						"  updated_at = datetime('now') "
+						"WHERE id = :id", up);
+
+					json resp;
+					resp["success"] = true;
+					resp["id"] = existing[0].value("id", (long long)0);
+					resp["message"] = "Process refreshed: " + name;
+					resp["deduplicated"] = true;
+					return TMcpToolResult::Success(resp);
+				}
+
 				db->Execute(
 					"INSERT INTO business_processes (name, description, steps, synonyms, related_entities) "
 					"VALUES (:name, :description, :steps, :synonyms, :related_entities)", p);
@@ -969,6 +1179,40 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 			p["notes"] = GetStr(args, "notes");
 
 			try {
+				Params ep;
+				ep["purpose"] = purpose;
+				json existing = db->Query(
+					"SELECT id, sql_text FROM verified_queries "
+					"WHERE purpose = :purpose ORDER BY updated_at DESC, id DESC LIMIT 20", ep);
+
+				if (!existing.empty()) {
+					long long existingId = 0;
+					for (const auto &row : existing) {
+						existingId = row.value("id", (long long)0);
+						if (TextEqualsCi(row.value("sql_text", std::string()), sqlText))
+							break;
+					}
+
+					if (existingId > 0) {
+						Params up = p;
+						up["id"] = std::to_string(existingId);
+						db->Execute(
+							"UPDATE verified_queries SET "
+							"  sql_text = :sql_text, "
+							"  result_summary = :result_summary, "
+							"  notes = :notes, "
+							"  updated_at = datetime('now') "
+							"WHERE id = :id", up);
+
+						json resp;
+						resp["success"] = true;
+						resp["id"] = existingId;
+						resp["message"] = "Query refreshed: " + purpose;
+						resp["deduplicated"] = true;
+						return TMcpToolResult::Success(resp);
+					}
+				}
+
 				db->Execute(
 					"INSERT INTO verified_queries (purpose, sql_text, result_summary, notes) "
 					"VALUES (:purpose, :sql_text, :result_summary, :notes)", p);
@@ -1271,20 +1515,51 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 				// 1. Extract entities with relevance scores
 				std::map<std::string, int> entScores;
 				std::map<std::string, std::set<std::string>> entSources;
+				std::set<std::string> anchoredEntities;
 
 				for (const auto &r : factMatches) {
 					std::string e = r.value("entity", std::string());
-					if (!e.empty()) { entScores[e] += 2; entSources[e].insert("facts"); }
+					if (!e.empty()) {
+						int bonus = 2
+							+ ConfidenceBonus(r.value("confidence", std::string()))
+							+ QueryMatchBonus(question, words, {
+								e,
+								r.value("description", std::string())
+							});
+						if (bonus < 1) bonus = 1;
+						entScores[e] += bonus;
+						entSources[e].insert("facts");
+						anchoredEntities.insert(e);
+					}
 				}
 				for (const auto &r : glossaryMatches) {
 					std::string e = r.value("entity", std::string());
-					if (!e.empty()) { entScores[e] += 3; entSources[e].insert("glossary"); }
+					if (!e.empty()) {
+						int bonus = 3 + QueryMatchBonus(question, words, {
+							e,
+							r.value("term", std::string()),
+							r.value("context", std::string())
+						});
+						entScores[e] += bonus;
+						entSources[e].insert("glossary");
+						anchoredEntities.insert(e);
+					}
 				}
 				for (const auto &r : formMatches) {
 					std::string mt = r.value("main_table", std::string());
-					if (!mt.empty()) { entScores[mt] += 3; entSources[mt].insert("forms"); }
+					if (!mt.empty()) {
+						int bonus = 3 + QueryMatchBonus(question, words, {
+							mt,
+							r.value("template", std::string()),
+							r.value("class_name", std::string()),
+							r.value("file_path", std::string())
+						});
+						entScores[mt] += bonus;
+						entSources[mt].insert("forms");
+						anchoredEntities.insert(mt);
+					}
 				}
-				// Deduplicate process-related entities (flat +1 per entity)
+				// Deduplicate process-related entities, but only keep anchored or directly matched ones
 				std::set<std::string> procEnts;
 				for (const auto &r : processMatches) {
 					std::string re = r.value("related_entities", std::string());
@@ -1292,18 +1567,28 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 						json arr = json::parse(re);
 						if (arr.is_array())
 							for (const auto &item : arr)
-								if (item.is_string()) procEnts.insert(item.get<std::string>());
+								if (item.is_string()) {
+									std::string e = item.get<std::string>();
+									if (!e.empty() &&
+										(anchoredEntities.count(e) ||
+										QueryMatchBonus(question, words, {e}) > 0))
+										procEnts.insert(e);
+								}
 					} catch (...) {}
 				}
 				for (const auto &e : procEnts) { entScores[e] += 1; entSources[e].insert("processes"); }
 
-				// Deduplicate relationship entities (flat +1 per entity)
+				// Deduplicate relationship entities, but only keep anchored or directly matched ones
 				std::set<std::string> relEnts;
 				for (const auto &r : relMatches) {
 					std::string ef = r.value("entity_from", std::string());
 					std::string et = r.value("entity_to", std::string());
-					if (!ef.empty()) relEnts.insert(ef);
-					if (!et.empty()) relEnts.insert(et);
+					if (!ef.empty() &&
+						(anchoredEntities.count(ef) || QueryMatchBonus(question, words, {ef}) > 0))
+						relEnts.insert(ef);
+					if (!et.empty() &&
+						(anchoredEntities.count(et) || QueryMatchBonus(question, words, {et}) > 0))
+						relEnts.insert(et);
 				}
 				for (const auto &e : relEnts) { entScores[e] += 1; entSources[e].insert("relationships"); }
 
@@ -1683,21 +1968,24 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 			.AddString("entity_to", "Target entity name", true)
 			.AddString("rel_type", "Relationship type: creates|contains|references|depends_on|produces|consumes", true)
 			.AddString("description", "Relationship description")
-			.AddString("evidence", "Evidence (file:line, SQL, etc.)"),
+			.AddString("evidence", "Evidence (file:line, SQL, etc.)", true),
 		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
 			std::string entityFrom = GetStr(args, "entity_from");
 			std::string entityTo = GetStr(args, "entity_to");
 			std::string relType = GetStr(args, "rel_type");
+			std::string evidence = GetStr(args, "evidence");
 
 			if (entityFrom.empty() || entityTo.empty() || relType.empty())
 				return TMcpToolResult::Error("Missing required parameters: entity_from, entity_to, rel_type");
+			if (evidence.empty())
+				return TMcpToolResult::Error("Missing required parameter: evidence");
 
 			Params p;
 			p["entity_from"] = entityFrom;
 			p["entity_to"] = entityTo;
 			p["rel_type"] = relType;
 			p["description"] = GetStr(args, "description");
-			p["evidence"] = GetStr(args, "evidence");
+			p["evidence"] = evidence;
 
 			try {
 				db->Execute(
@@ -1797,23 +2085,60 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 				// Save facts
 				json factsArr = GetArray(args, "facts");
 				if (!factsArr.empty()) {
-					for (const auto &item : factsArr) {
+					for (size_t factIndex = 0; factIndex < factsArr.size(); factIndex++) {
+						const auto &item = factsArr[factIndex];
 						std::string entity = GetStr(item, "entity");
 						std::string factType = GetStr(item, "fact_type");
 						std::string description = GetStr(item, "description");
 						if (entity.empty() || factType.empty() || description.empty()) continue;
+						std::string evidence = GetStr(item, "evidence");
+						if (evidence.empty())
+							throw std::runtime_error(
+								"bulk_save facts[" + std::to_string(factIndex) + "] missing evidence");
 
 						Params p;
 						p["entity"] = entity;
 						p["fact_type"] = factType;
 						p["description"] = description;
-						p["evidence"] = GetStr(item, "evidence");
+						p["evidence"] = evidence;
 						p["confidence"] = GetStr(item, "confidence", "unverified");
 						p["task_context"] = GetStr(item, "task_context");
 
-						db->Execute(
-							"INSERT INTO facts (entity, fact_type, description, evidence, confidence, task_context) "
-							"VALUES (:entity, :fact_type, :description, :evidence, :confidence, :task_context)", p);
+						Params ep;
+						ep["entity"] = entity;
+						ep["fact_type"] = factType;
+						json existing = db->Query(
+							"SELECT id, description, confidence FROM facts "
+							"WHERE entity = :entity AND fact_type = :fact_type "
+							"ORDER BY updated_at DESC LIMIT 50", ep);
+
+						bool refreshed = false;
+						for (const auto &row : existing) {
+							if (!TextEqualsCi(row.value("description", std::string()), description))
+								continue;
+
+							Params up = p;
+							up["id"] = std::to_string(row.value("id", (long long)0));
+							up["confidence"] = StrongerConfidence(
+								row.value("confidence", std::string("unverified")),
+								p["confidence"]);
+							db->Execute(
+								"UPDATE facts SET "
+								"  description = :description, "
+								"  evidence = :evidence, "
+								"  confidence = :confidence, "
+								"  task_context = CASE WHEN :task_context <> '' THEN :task_context ELSE task_context END, "
+								"  updated_at = datetime('now') "
+								"WHERE id = :id", up);
+							refreshed = true;
+							break;
+						}
+
+						if (!refreshed) {
+							db->Execute(
+								"INSERT INTO facts (entity, fact_type, description, evidence, confidence, task_context) "
+								"VALUES (:entity, :fact_type, :description, :evidence, :confidence, :task_context)", p);
+						}
 						factCount++;
 					}
 				}
@@ -1870,13 +2195,17 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 						std::string entityTo = GetStr(item, "entity_to");
 						std::string relType = GetStr(item, "rel_type");
 						if (entityFrom.empty() || entityTo.empty() || relType.empty()) continue;
+						std::string evidence = GetStr(item, "evidence");
+						if (evidence.empty())
+							throw std::runtime_error(
+								"bulk_save relationship missing evidence for " + entityFrom + " -> " + entityTo);
 
 						Params p;
 						p["entity_from"] = entityFrom;
 						p["entity_to"] = entityTo;
 						p["rel_type"] = relType;
 						p["description"] = GetStr(item, "description");
-						p["evidence"] = GetStr(item, "evidence");
+						p["evidence"] = evidence;
 
 						db->Execute(
 							"INSERT OR REPLACE INTO relationships (entity_from, entity_to, rel_type, description, evidence) "
@@ -2991,15 +3320,14 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 					resp["last_updated"] = lastUpd;
 
 					// Completeness
-					int items = 0;
-					if (totalFacts > 0) items++;
+					std::set<std::string> ftSet;
+					for (const auto &r : facts) ftSet.insert(r.value("fact_type", std::string()));
+					int items = std::min((int)ftSet.size(), 6);
 					if (ro + ri > 0) items++;
 					if (!form.empty()) items++;
 					if (!gloss.empty()) items++;
-					std::set<std::string> ftSet;
-					for (const auto &r : facts) ftSet.insert(r.value("fact_type", std::string()));
-					items += (int)ftSet.size();
 					int maxItems = 9; // 6 fact types + form + glossary + relationships
+					if (items > maxItems) items = maxItems;
 					resp["completeness_score"] = (int)(100.0 * items / maxItems);
 
 					return TMcpToolResult::Success(resp);
@@ -3300,23 +3628,54 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 				// === STEP 3: Entity extraction + ranking ===
 				std::map<std::string, int> entScores;
 				std::map<std::string, std::set<std::string>> entSources;
+				std::set<std::string> anchoredEntities;
 
-				// Facts: +2 per match
+				// Facts: anchor entity matches with confidence and exact-match bonuses
 				for (const auto &r : factMatches) {
 					std::string e = r.value("entity", std::string());
-					if (!e.empty()) { entScores[e] += 2; entSources[e].insert("facts"); }
+					if (!e.empty()) {
+						int bonus = 2
+							+ ConfidenceBonus(r.value("confidence", std::string()))
+							+ QueryMatchBonus(task, words, {
+								e,
+								r.value("description", std::string())
+							});
+						if (bonus < 1) bonus = 1;
+						entScores[e] += bonus;
+						entSources[e].insert("facts");
+						anchoredEntities.insert(e);
+					}
 				}
-				// Glossary: +3 (high-value match)
+				// Glossary: high-value exact identifier match
 				for (const auto &r : glossMatches) {
 					std::string e = r.value("entity", std::string());
-					if (!e.empty()) { entScores[e] += 3; entSources[e].insert("glossary"); }
+					if (!e.empty()) {
+						int bonus = 3 + QueryMatchBonus(task, words, {
+							e,
+							r.value("term", std::string()),
+							r.value("context", std::string())
+						});
+						entScores[e] += bonus;
+						entSources[e].insert("glossary");
+						anchoredEntities.insert(e);
+					}
 				}
-				// Forms: +3
+				// Forms: high-value exact identifier match
 				for (const auto &r : formMatches) {
 					std::string mt = r.value("main_table", std::string());
-					if (!mt.empty()) { entScores[mt] += 3; entSources[mt].insert("forms"); }
+					if (!mt.empty()) {
+						int bonus = 3 + QueryMatchBonus(task, words, {
+							mt,
+							r.value("template", std::string()),
+							r.value("class_name", std::string()),
+							r.value("file_path", std::string())
+						});
+						entScores[mt] += bonus;
+						entSources[mt].insert("forms");
+						anchoredEntities.insert(mt);
+					}
 				}
-				// Processes: +1 per related entity
+				// Processes: only keep entities already anchored or directly named in task
 				for (const auto &r : procMatches) {
 					try {
 						json arr = json::parse(r.value("related_entities", std::string()));
@@ -3324,17 +3683,29 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 							for (const auto &item : arr)
 								if (item.is_string()) {
 									std::string e = item.get<std::string>();
-									entScores[e] += 1;
-									entSources[e].insert("processes");
+									if (!e.empty() &&
+										(anchoredEntities.count(e) ||
+										QueryMatchBonus(task, words, {e}) > 0)) {
+										entScores[e] += 1;
+										entSources[e].insert("processes");
+									}
 								}
 					} catch (...) {}
 				}
-				// Relationships: +1 per entity
+				// Relationships: only keep anchored or directly matched entities
 				for (const auto &r : relMatches) {
 					std::string ef = r.value("entity_from", std::string());
 					std::string et = r.value("entity_to", std::string());
-					if (!ef.empty()) { entScores[ef] += 1; entSources[ef].insert("relationships"); }
-					if (!et.empty()) { entScores[et] += 1; entSources[et].insert("relationships"); }
+					if (!ef.empty() &&
+						(anchoredEntities.count(ef) || QueryMatchBonus(task, words, {ef}) > 0)) {
+						entScores[ef] += 1;
+						entSources[ef].insert("relationships");
+					}
+					if (!et.empty() &&
+						(anchoredEntities.count(et) || QueryMatchBonus(task, words, {et}) > 0)) {
+						entScores[et] += 1;
+						entSources[et].insert("relationships");
+					}
 				}
 
 				// Apply feedback boosting
@@ -3351,9 +3722,8 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 							int neg = (int)r.value("neg", (long long)0);
 							if (entScores.count(e) && (pos + neg) > 0) {
 								double ratio = (double)pos / (pos + neg);
-								// Boost useful entities, penalize useless
-								double factor = 0.5 + 0.5 * ratio; // range: 0.5 - 1.0
-								entScores[e] = (int)(entScores[e] * factor);
+								double factor = 0.5 + ratio; // range: 0.5 - 1.5
+								entScores[e] = (int)(entScores[e] * factor + 0.5);
 								if (entScores[e] < 1) entScores[e] = 1;
 							}
 						}
@@ -3557,11 +3927,23 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 				// === STEP 6: Compact summaries for non-entity results ===
 				// Relevant facts (top 15 from FTS)
 				json relevantFacts = json::array();
-				for (size_t i = 0; i < factMatches.size() && i < 15; i++) {
+				std::set<std::string> rankedEntities;
+				for (const auto &re : ranked)
+					rankedEntities.insert(re.first);
+				for (size_t i = 0; i < factMatches.size() && relevantFacts.size() < 15; i++) {
 					const auto &f = factMatches[i];
+					std::string entityName = f.value("entity", std::string());
+					if (!entityName.empty() &&
+						!rankedEntities.count(entityName) &&
+						QueryMatchBonus(task, words, {
+							entityName,
+							f.value("description", std::string())
+						}) == 0) {
+						continue;
+					}
 					relevantFacts.push_back(json{
 						{"id", f.value("id", (long long)0)},
-						{"entity", f.value("entity", std::string())},
+						{"entity", entityName},
 						{"type", f.value("fact_type", std::string())},
 						{"description", f.value("description", std::string())},
 						{"confidence", f.value("confidence", std::string())}

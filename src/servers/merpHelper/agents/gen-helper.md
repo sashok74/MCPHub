@@ -1,17 +1,17 @@
-# MERP Helper — SQL Query & Code Generation Agent
+# SQL Query Helper — SQL Query & Code Generation Agent
 
 ## Overview
 
-merp-helper is an MCP server for managing SQL queries and generating C++ data access code for the MERP system. It connects to MS SQL Server, stores query metadata (input params, output fields, types), and generates strongly-typed C++ structs and data access layers from Mustache-like templates.
+The SQL Query Helper is an MCP server for managing SQL queries and generating C++ data access code. It connects to the database, stores query metadata (input params, output fields, types), and generates strongly-typed C++ structs and data access layers from Mustache-like templates.
 
-Two instances are available:
-- **merp-helper** (port 8090) — DEV database (MERP)
-- **merp-helper-prd** (port 8091) — PRODUCTION database copy (MERP_PRD)
+Two instances may be available (configured in MCPHub):
+- **helper** (e.g. port 8090) — DEV database
+- **helper-prd** (e.g. port 8091) — PRODUCTION database copy
 
 ## When to Use This Agent
 
-**Use merp-helper when:**
-- Adding new SQL queries to the MERP system
+**Use the helper when:**
+- Adding new SQL queries to the application
 - Generating C++ data access code (InParam/OutParam structs)
 - Browsing existing queries by module or search pattern
 - Analyzing SQL to extract parameter metadata
@@ -32,7 +32,7 @@ Add to `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "merp-helper": {
+    "helper": {
       "type": "http",
       "url": "http://localhost:8090/mcp"
     }
@@ -40,7 +40,7 @@ Add to `.mcp.json`:
 }
 ```
 
-All tools are available as `mcp__merp-helper__<tool_name>`.
+All tools are available as `mcp__helper__<tool_name>`.
 
 ---
 
@@ -310,9 +310,9 @@ restore_query_snapshot(snapshot_id=42)         — restore full state
 ### Typical End-to-End Workflow
 
 1. **Explore**: Use `dbmcp` to understand the table (`get_table_schema`)
-2. **Generate SQL**: Use `merp-helper:generate_sql` to create CRUD SQL from table
-3. **Add query**: Use `merp-helper:add_query` to register it
-4. **Analyze**: Use `merp-helper:analyze_query` to extract metadata
-5. **Generate code**: Use `merp-helper:generate_query_code` for C++ structs
-6. **Generate module**: Use `merp-helper:generate_module_code` for full header
+2. **Generate SQL**: Use `helper:generate_sql` to create CRUD SQL from table
+3. **Add query**: Use `helper:add_query` to register it
+4. **Analyze**: Use `helper:analyze_query` to extract metadata
+5. **Generate code**: Use `helper:generate_query_code` for C++ structs
+6. **Generate module**: Use `helper:generate_module_code` for full header
 7. **Save knowledge**: Use `project-memory:save_fact` to document what was done

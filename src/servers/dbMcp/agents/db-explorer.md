@@ -23,8 +23,8 @@ Two instances may be available (configured in MCPHub):
 - Comparing table schemas side-by-side
 
 **Do NOT use for:**
-- Managing SQL queries for code generation (use `merp-helper` instead)
-- Generating C++ data access code (use `merp-helper` instead)
+- Managing SQL queries for code generation (use `helper` instead)
+- Generating C++ data access code (use `helper` instead)
 - Saving knowledge about business logic (use `project-memory` instead)
 
 ## How to Add to a Project
@@ -225,7 +225,7 @@ The SQL dialect depends on the configured provider. Adjust queries accordingly:
 
 | Need | Agent | Example |
 |------|-------|---------|
-| Manage SQL queries for C++ code gen | `merp-helper` | `add_query`, `analyze_query`, `generate_query_code` |
+| Manage SQL queries for C++ code gen | `helper` | `add_query`, `analyze_query`, `generate_query_code` |
 | Save knowledge about DB findings | `project-memory` | `save_fact`, `save_relationship` |
 | Gather context before a task | `pm-context` | Auto-context agent |
 | Build C++ project | `/build` | Compile after changes |
@@ -235,7 +235,7 @@ The SQL dialect depends on the configured provider. Adjust queries accordingly:
 1. **Explore**: Use `dbmcp:get_table_schema` to understand the table
 2. **Query**: Use `dbmcp:execute_query` to test SQL
 3. **Optimize**: Use `dbmcp:explain_query` + snapshot workflow
-4. **Register**: Use `merp-helper:add_query` to create a managed query
-5. **Analyze**: Use `merp-helper:analyze_query` to extract metadata
-6. **Generate**: Use `merp-helper:generate_query_code` for C++ structs
+4. **Register**: Use `helper:add_query` to create a managed query
+5. **Analyze**: Use `helper:analyze_query` to extract metadata
+6. **Generate**: Use `helper:generate_query_code` for C++ structs
 7. **Remember**: Use `project-memory:save_fact` to document findings
