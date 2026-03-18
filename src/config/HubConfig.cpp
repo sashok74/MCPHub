@@ -32,6 +32,16 @@ void HubConfig::Load(const std::string& path)
 					FModules.push_back(std::move(mc));
 			}
 		}
+
+		if (j.contains("window") && j["window"].is_object())
+		{
+			auto& w = j["window"];
+			FWindow.left = w.value("left", -1);
+			FWindow.top = w.value("top", -1);
+			FWindow.width = w.value("width", -1);
+			FWindow.height = w.value("height", -1);
+			FWindow.maximized = w.value("maximized", false);
+		}
 	}
 	catch (...)
 	{
@@ -56,6 +66,14 @@ void HubConfig::Save(const std::string& path)
 	}
 
 	j["modules"] = std::move(arr);
+
+	nlohmann::json wj;
+	wj["left"] = FWindow.left;
+	wj["top"] = FWindow.top;
+	wj["width"] = FWindow.width;
+	wj["height"] = FWindow.height;
+	wj["maximized"] = FWindow.maximized;
+	j["window"] = std::move(wj);
 
 	std::ofstream f(path);
 	if (f.is_open())

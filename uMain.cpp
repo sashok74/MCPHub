@@ -98,6 +98,21 @@ __fastcall TfrmMain::TfrmMain(TComponent* Owner)
 
 	// Determine config path next to EXE
 	FConfigPath = s(ExtractFilePath(Application->ExeName)) + "mcphub.config.json";
+
+	// Load config early so we can restore window geometry before Show
+	FConfig.Load(FConfigPath);
+
+	const auto& ws = FConfig.GetWindow();
+	if (ws.width > 0 && ws.height > 0)
+	{
+		Position = poDesigned;
+		Left = ws.left;
+		Top = ws.top;
+		Width = ws.width;
+		Height = ws.height;
+		if (ws.maximized)
+			WindowState = wsMaximized;
+	}
 }
 
 //---------------------------------------------------------------------------
@@ -116,8 +131,7 @@ void __fastcall TfrmMain::FormShow(TObject *Sender)
 		pmAddModule->Items->Add(item);
 	}
 
-	// Load config and create modules
-	FConfig.Load(FConfigPath);
+	// Create modules from config (loaded in constructor)
 	for (const auto& mc : FConfig.GetModules())
 	{
 		try
@@ -177,6 +191,30 @@ void __fastcall TfrmMain::FormClose(TObject *Sender, TCloseAction &Action)
 			StopModuleHttp((int)i);
 			FModules[i]->Stop();
 		}
+	}
+
+	// Save window state
+	auto& ws = FConfig.GetWindow();
+	ws.maximized = (WindowState == wsMaximized);
+	if (ws.maximized)
+	{
+		// Store restored (normal) bounds
+		TRect r = BoundsRect;
+		GetWindowPlacement(Handle, nullptr); // force update
+		WINDOWPLACEMENT wp = {};
+		wp.length = sizeof(wp);
+		GetWindowPlacement(Handle, &wp);
+		ws.left = wp.rcNormalPosition.left;
+		ws.top = wp.rcNormalPosition.top;
+		ws.width = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+		ws.height = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+	}
+	else
+	{
+		ws.left = Left;
+		ws.top = Top;
+		ws.width = Width;
+		ws.height = Height;
 	}
 
 	// Save config
@@ -502,6 +540,16 @@ void __fastcall TfrmMain::btnStartAllClick(TObject *Sender)
 		SelectModule(FSelectedIndex);
 }
 
+void __fastcall TfrmMain::btnSaveConfigClick(TObject *Sender)
+{
+	// Apply current panel edits before saving
+	if (FSelectedIndex >= 0 && FSelectedIndex < (int)FModules.size())
+		ApplyConfigFromPanel(FModules[FSelectedIndex].get());
+
+	SaveConfig();
+	StatusBar->SimpleText = L"Config saved";
+}
+
 void __fastcall TfrmMain::btnStopAllClick(TObject *Sender)
 {
 	for (size_t i = 0; i < FModules.size(); i++)
@@ -641,6 +689,7 @@ void TfrmMain::StartModuleHttp(int index)
 		// Create TIdHTTPServer
 		info.HttpServer = new TIdHTTPServer(nullptr);
 		info.HttpServer->DefaultPort = port;
+		info.HttpServer->ReuseSocket = rsTrue;
 
 		// Create HttpTransport with CORS
 		Mcp::Transport::TCorsConfig corsConfig;

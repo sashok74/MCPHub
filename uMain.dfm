@@ -242,13 +242,22 @@ object frmMain: TfrmMain
       TabOrder = 0
       OnClick = btnAddClick
     end
+    object btnSaveConfig: TButton
+      Left = 96
+      Top = 6
+      Width = 90
+      Height = 28
+      Caption = 'Save Config'
+      TabOrder = 1
+      OnClick = btnSaveConfigClick
+    end
     object btnStartAll: TButton
       Left = 706
       Top = 6
       Width = 85
       Height = 28
       Caption = 'Start All'
-      TabOrder = 1
+      TabOrder = 2
       OnClick = btnStartAllClick
     end
     object btnStopAll: TButton
@@ -257,7 +266,7 @@ object frmMain: TfrmMain
       Width = 85
       Height = 28
       Caption = 'Stop All'
-      TabOrder = 2
+      TabOrder = 3
       OnClick = btnStopAllClick
     end
   end

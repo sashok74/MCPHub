@@ -106,6 +106,7 @@ __published:
 	TPanel *panBottom;
 	TButton *btnAdd;
 	TPopupMenu *pmAddModule;
+	TButton *btnSaveConfig;
 	TButton *btnStartAll;
 	TButton *btnStopAll;
 
@@ -130,6 +131,7 @@ __published:
 	void __fastcall btnStopClick(TObject *Sender);
 	void __fastcall btnDeleteClick(TObject *Sender);
 	void __fastcall btnAddClick(TObject *Sender);
+	void __fastcall btnSaveConfigClick(TObject *Sender);
 	void __fastcall btnStartAllClick(TObject *Sender);
 	void __fastcall btnStopAllClick(TObject *Sender);
 	void __fastcall pcDetailsChange(TObject *Sender);

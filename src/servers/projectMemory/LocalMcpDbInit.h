@@ -493,6 +493,34 @@ inline void InitializeProjectMemorySchema(LocalMcpDb *db)
 		"  VALUES (new.id, new.form_class, new.form_type, new.handlers, new.validations, new.notes); "
 		"END;"
 	);
+
+	// ===================================================================
+	// Schema migrations — add missing columns to tables created by older
+	// versions.  ALTER TABLE ADD COLUMN is a no-op (caught by try/catch)
+	// when the column already exists.
+	// ===================================================================
+	auto SafeAddColumn = [db](const char *ddl) {
+		try { db->Exec(ddl); } catch (...) {}
+	};
+
+	// verified_queries: renamed verified_at → updated_at
+	SafeAddColumn("ALTER TABLE verified_queries ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))");
+	SafeAddColumn("ALTER TABLE verified_queries ADD COLUMN created_at TEXT DEFAULT (datetime('now'))");
+
+	// form_table_map
+	SafeAddColumn("ALTER TABLE form_table_map ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))");
+
+	// glossary
+	SafeAddColumn("ALTER TABLE glossary ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))");
+
+	// code_patterns
+	SafeAddColumn("ALTER TABLE code_patterns ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))");
+
+	// feature_requests
+	SafeAddColumn("ALTER TABLE feature_requests ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))");
+
+	// relationships
+	SafeAddColumn("ALTER TABLE relationships ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))");
 }
 
 #endif

@@ -19,6 +19,14 @@ struct ModuleConfig {
 	nlohmann::json config;
 };
 
+struct WindowState {
+	int left = -1;
+	int top = -1;
+	int width = -1;
+	int height = -1;
+	bool maximized = false;
+};
+
 //---------------------------------------------------------------------------
 
 class HubConfig
@@ -30,11 +38,15 @@ public:
 	std::vector<ModuleConfig>& GetModules() { return FModules; }
 	const std::vector<ModuleConfig>& GetModules() const { return FModules; }
 
+	WindowState& GetWindow() { return FWindow; }
+	const WindowState& GetWindow() const { return FWindow; }
+
 	void AddModule(const ModuleConfig& m);
 	void RemoveModule(const std::string& instanceId);
 
 private:
 	std::vector<ModuleConfig> FModules;
+	WindowState FWindow;
 };
 
 //---------------------------------------------------------------------------
