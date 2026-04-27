@@ -39,7 +39,7 @@ object frmMain: TfrmMain
       Columns = <
         item
           Caption = 'Name'
-          Width = 100
+          Width = 130
         end
         item
           Caption = 'Type'
@@ -61,6 +61,7 @@ object frmMain: TfrmMain
           Caption = 'Reqs'
           Width = 40
         end>
+      Checkboxes = True
       ColumnClick = False
       HideSelection = False
       ReadOnly = True
@@ -260,13 +261,22 @@ object frmMain: TfrmMain
       TabOrder = 2
       OnClick = btnStartAllClick
     end
+    object btnMcpJson: TButton
+      Left = 194
+      Top = 6
+      Width = 90
+      Height = 28
+      Caption = 'mcp.json'
+      TabOrder = 3
+      OnClick = btnMcpJsonClick
+    end
     object btnStopAll: TButton
       Left = 800
       Top = 6
       Width = 85
       Height = 28
       Caption = 'Stop All'
-      TabOrder = 3
+      TabOrder = 4
       OnClick = btnStopAllClick
     end
   end

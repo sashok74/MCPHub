@@ -450,6 +450,135 @@ inline ToolList GetMerpHelperTools(
 	},
 
 	// ═══════════════════════════════════════════════════════════════════════
+	// 6b. update_field — update properties of a single output field
+	// ═══════════════════════════════════════════════════════════════════════
+	{
+		"update_field",
+		"Update properties of a single output field by name. "
+		"Only specified optional properties are changed. "
+		"Automatically creates a snapshot before updating.",
+		TMcpToolSchema()
+			.AddString("query_name", "Query name", true)
+			.AddString("field_name", "Field name to update", true)
+			.AddBoolean("displayZero", "Show zero values (DisplayZero)")
+			.AddBoolean("isKeyField", "Is primary key field")
+			.AddBoolean("isNullable", "Is nullable")
+			.AddString("treeIdent", "Tree identifier: ID, PID, or empty")
+			.AddString("defaultValue", "Default value for code generation"),
+		[storage, localDb](const json& args, TMcpToolContext&) -> TMcpToolResult
+		{
+			try {
+				std::string name = MhGetStr(args, "query_name");
+				std::string fieldName = MhGetStr(args, "field_name");
+				if (name.empty())
+					return TMcpToolResult::Error("query_name is required");
+				if (fieldName.empty())
+					return TMcpToolResult::Error("field_name is required");
+
+				auto qr = storage->GetQueryByName(name);
+				if (qr.queryID == 0)
+					return TMcpToolResult::Error("Query not found: " + name);
+
+				auto fields = storage->GetOutputFields(qr.queryID);
+				FieldRecord* target = nullptr;
+				for (auto& f : fields) {
+					if (f.fieldName == fieldName) { target = &f; break; }
+				}
+				if (!target)
+					return TMcpToolResult::Error("Field not found: " + fieldName);
+
+				// Auto-snapshot before update
+				int snapId = MhCreateSnapshot(localDb, storage, name, "update_field");
+
+				if (args.contains("displayZero") && !args["displayZero"].is_null())
+					target->displayZero = MhGetBool(args, "displayZero", false);
+				if (args.contains("isKeyField") && !args["isKeyField"].is_null())
+					target->isKeyField = MhGetBool(args, "isKeyField", false);
+				if (args.contains("isNullable") && !args["isNullable"].is_null())
+					target->isNullable = MhGetBool(args, "isNullable", false);
+				if (args.contains("treeIdent") && !args["treeIdent"].is_null())
+					target->treeIdent = MhGetStr(args, "treeIdent");
+				if (args.contains("defaultValue") && !args["defaultValue"].is_null())
+					target->defaultValue = MhGetStr(args, "defaultValue");
+
+				storage->SaveOutputFields(qr.queryID, fields);
+
+				json result = json{
+					{"status", "updated"}, {"queryID", qr.queryID},
+					{"field", FieldRecordToJson(*target)}
+				};
+				if (snapId > 0) result["snapshot_id"] = snapId;
+				return TMcpToolResult::Success(result);
+			} catch (const Exception& e) {
+				return TMcpToolResult::Error(utf8(e.Message));
+			}
+		}
+	},
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// 6c. update_param — update properties of a single input param
+	// ═══════════════════════════════════════════════════════════════════════
+	{
+		"update_param",
+		"Update properties of a single input parameter by name. "
+		"Only specified optional properties are changed. "
+		"Automatically creates a snapshot before updating.",
+		TMcpToolSchema()
+			.AddString("query_name", "Query name", true)
+			.AddString("param_name", "Parameter name to update", true)
+			.AddBoolean("isKeyField", "Is key field")
+			.AddBoolean("isNullable", "Is nullable")
+			.AddString("defaultValue", "Default value for code generation")
+			.AddString("nullValue", "Null-check value"),
+		[storage, localDb](const json& args, TMcpToolContext&) -> TMcpToolResult
+		{
+			try {
+				std::string name = MhGetStr(args, "query_name");
+				std::string paramName = MhGetStr(args, "param_name");
+				if (name.empty())
+					return TMcpToolResult::Error("query_name is required");
+				if (paramName.empty())
+					return TMcpToolResult::Error("param_name is required");
+
+				auto qr = storage->GetQueryByName(name);
+				if (qr.queryID == 0)
+					return TMcpToolResult::Error("Query not found: " + name);
+
+				auto params = storage->GetInputParams(qr.queryID);
+				ParamRecord* target = nullptr;
+				for (auto& p : params) {
+					if (p.paramName == paramName) { target = &p; break; }
+				}
+				if (!target)
+					return TMcpToolResult::Error("Param not found: " + paramName);
+
+				// Auto-snapshot before update
+				int snapId = MhCreateSnapshot(localDb, storage, name, "update_param");
+
+				if (args.contains("isKeyField") && !args["isKeyField"].is_null())
+					target->isKeyField = MhGetBool(args, "isKeyField", false);
+				if (args.contains("isNullable") && !args["isNullable"].is_null())
+					target->isNullable = MhGetBool(args, "isNullable", false);
+				if (args.contains("defaultValue") && !args["defaultValue"].is_null())
+					target->defaultValue = MhGetStr(args, "defaultValue");
+				if (args.contains("nullValue") && !args["nullValue"].is_null())
+					target->nullValue = MhGetStr(args, "nullValue");
+
+				storage->SaveInputParams(qr.queryID, params);
+
+				json result = json{
+					{"status", "updated"}, {"queryID", qr.queryID},
+					{"param", ParamRecordToJson(*target)}
+				};
+				if (snapId > 0) result["snapshot_id"] = snapId;
+				return TMcpToolResult::Success(result);
+			} catch (const Exception& e) {
+				return TMcpToolResult::Error(utf8(e.Message));
+			}
+		}
+	},
+
+	// ═══════════════════════════════════════════════════════════════════════
 	// 7. delete_query
 	// ═══════════════════════════════════════════════════════════════════════
 	{

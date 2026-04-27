@@ -644,7 +644,103 @@ inline bool FederateEntity(LocalMcpDb *db, Federation::DbMcpClient *fedClient,
 }
 
 //---------------------------------------------------------------------------
-// GetProjectMemoryTools — Returns all 40 tools
+// Helper: write audit log entry (used by delete/merge/rename tools)
+//---------------------------------------------------------------------------
+inline long long WriteAudit(LocalMcpDb *db,
+	const std::string &toolName,
+	const std::string &entityRef,
+	const std::string &action,
+	const json &params,
+	const json &resultDiff)
+{
+	try {
+		LocalMcpDb::Params p;
+		p["tool_name"] = toolName;
+		p["entity_ref"] = entityRef;
+		p["action"] = action;
+		p["params_json"] = params.is_null() ? std::string("{}") : params.dump();
+		p["result_diff"] = resultDiff.is_null() ? std::string("{}") : resultDiff.dump();
+		db->Execute(
+			"INSERT INTO audit_log (tool_name, entity_ref, action, params_json, result_diff) "
+			"VALUES (:tool_name, :entity_ref, :action, :params_json, :result_diff)", p);
+		return db->LastInsertRowId();
+	} catch (...) {
+		return 0;
+	}
+}
+
+//---------------------------------------------------------------------------
+// Helper: tokenize identifier into lowercase tokens by CamelCase and
+// non-alphanumeric separators.  Used by detect_duplicates (Jaccard).
+//   "CProductionTaskDlg" → ["c", "production", "task", "dlg"]
+//   "MoveMaterialLine"   → ["move", "material", "line"]
+//   "Склад и Движение"   → ["склад", "и", "движение"]
+//---------------------------------------------------------------------------
+inline std::vector<std::string> TokenizeIdentifier(const std::string &name)
+{
+	std::vector<std::string> tokens;
+	std::string current;
+
+	auto flush = [&]() {
+		if (!current.empty()) {
+			tokens.push_back(Utf8Lower(current));
+			current.clear();
+		}
+	};
+
+	for (size_t i = 0; i < name.size(); ) {
+		unsigned char c = static_cast<unsigned char>(name[i]);
+		if (c < 0x80) {
+			// ASCII byte
+			if (std::isalnum(c)) {
+				// Split on UPPERCASE letter preceded by a lowercase letter
+				if (std::isupper(c) && !current.empty()) {
+					unsigned char prev = static_cast<unsigned char>(current.back());
+					if (prev < 0x80 && std::islower(prev))
+						flush();
+				}
+				current += static_cast<char>(c);
+			} else {
+				// separator
+				flush();
+			}
+			i += 1;
+		} else {
+			// UTF-8 multibyte — append as-is
+			int len = 1;
+			if (c < 0xE0) len = 2;
+			else if (c < 0xF0) len = 3;
+			else len = 4;
+			for (int k = 0; k < len && i + k < name.size(); k++)
+				current += name[i + k];
+			i += len;
+		}
+	}
+	flush();
+
+	return tokens;
+}
+
+//---------------------------------------------------------------------------
+// Helper: Jaccard similarity on token sets.  Returns [0.0 .. 1.0].
+//---------------------------------------------------------------------------
+inline double JaccardSimilarity(const std::vector<std::string> &a,
+	const std::vector<std::string> &b)
+{
+	if (a.empty() && b.empty()) return 1.0;
+	if (a.empty() || b.empty()) return 0.0;
+	std::set<std::string> setA(a.begin(), a.end());
+	std::set<std::string> setB(b.begin(), b.end());
+	size_t intersect = 0;
+	for (const auto &t : setA)
+		if (setB.count(t)) intersect++;
+	size_t unionSize = setA.size() + setB.size() - intersect;
+	if (unionSize == 0) return 0.0;
+	return static_cast<double>(intersect) / static_cast<double>(unionSize);
+}
+
+//---------------------------------------------------------------------------
+// GetProjectMemoryTools — Returns all tools (40 legacy + 9 new maintenance)
 //---------------------------------------------------------------------------
 inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *fedClient = nullptr)
 {
@@ -1214,8 +1310,8 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 				}
 
 				db->Execute(
-					"INSERT INTO verified_queries (purpose, sql_text, result_summary, notes) "
-					"VALUES (:purpose, :sql_text, :result_summary, :notes)", p);
+					"INSERT INTO verified_queries (purpose, sql_text, result_summary, notes, created_at, updated_at) "
+					"VALUES (:purpose, :sql_text, :result_summary, :notes, datetime('now'), datetime('now'))", p);
 				long long id = db->LastInsertRowId();
 
 				// Auto-resolve search gaps mentioning this purpose
@@ -2257,6 +2353,13 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 				return TMcpToolResult::Error("Missing required parameter: entities (non-empty array)");
 
 			try {
+				// Ensure the module exists in canonical `modules` table
+				// (FK from entity_modules.module_name requires this).
+				Params mp;
+				mp["name"] = moduleName;
+				db->Execute(
+					"INSERT OR IGNORE INTO modules (name) VALUES (:name)", mp);
+
 				int added = 0;
 				for (const auto &ent : entitiesArr) {
 					std::string entity = ent.is_string() ? ent.get<std::string>() : "";
@@ -2324,13 +2427,36 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 	//=======================================================================
 	tools.push_back({
 		"list_modules",
-		"List all modules with entity counts.",
+		"List all modules with entity counts, description and display_order. "
+		"Returns modules from canonical `modules` table - includes empty modules.",
 		TMcpToolSchema(),
 		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
 			try {
+				// Modules table is authoritative after FK migration.
+				// LEFT JOIN shows empty modules too (entity_count = 0).
 				json rows = db->Query(
-					"SELECT module_name, COUNT(*) as entity_count "
-					"FROM entity_modules GROUP BY module_name ORDER BY module_name", {});
+					"SELECT m.name AS module_name, "
+					"       COALESCE(m.description, '') AS description, "
+					"       COALESCE(m.display_order, 0) AS display_order, "
+					"       (SELECT COUNT(*) FROM entity_modules em "
+					"        WHERE em.module_name = m.name) AS entity_count "
+					"FROM modules m "
+					"ORDER BY display_order, module_name", {});
+
+				// Also include any orphan module_names that somehow exist
+				// in entity_modules but not in modules (shouldn't happen
+				// post-migration but defensive).
+				json orphans = db->Query(
+					"SELECT em.module_name, "
+					"       '' AS description, 0 AS display_order, "
+					"       COUNT(*) AS entity_count "
+					"FROM entity_modules em "
+					"LEFT JOIN modules m ON m.name = em.module_name "
+					"WHERE m.name IS NULL "
+					"GROUP BY em.module_name", {});
+
+				for (const auto &r : orphans)
+					rows.push_back(r);
 
 				json resp;
 				resp["modules"] = rows;
@@ -4030,6 +4156,558 @@ inline ToolList GetProjectMemoryTools(LocalMcpDb *db, Federation::DbMcpClient *f
 					{"synonyms_expanded", (int)(expandedWords.size() - words.size())}
 				};
 
+				return TMcpToolResult::Success(resp);
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// === MAINTENANCE TOOLS (Iteration 1: P1 + P4 architecture) ===========
+	// create_module, update_module, delete_module, rename_module,
+	// clear_module, unlink_entity_from_module, bulk_reassign_module,
+	// detect_duplicates, detect_orphans.
+	// All destructive tools write to audit_log via WriteAudit().
+	//=======================================================================
+
+	//=======================================================================
+	// 41. create_module
+	//=======================================================================
+	tools.push_back({
+		"create_module",
+		"Create a module in the canonical `modules` table. "
+		"Used to explicitly register a module with metadata. "
+		"Note: save_module also auto-creates modules on first use.",
+		TMcpToolSchema()
+			.AddString("name", "Module name (unique)", true)
+			.AddString("description", "Module description")
+			.AddInteger("display_order", "Sort order (0 = top)"),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			std::string name = GetStr(args, "name");
+			if (name.empty())
+				return TMcpToolResult::Error("Missing required parameter: name");
+
+			std::string description = GetStr(args, "description");
+			int displayOrder = GetInt(args, "display_order", 0);
+
+			try {
+				Params p;
+				p["name"] = name;
+				p["description"] = description;
+				p["display_order"] = std::to_string(displayOrder);
+
+				int n = db->Execute(
+					"INSERT OR IGNORE INTO modules (name, description, display_order) "
+					"VALUES (:name, :description, :display_order)", p);
+
+				bool created = (n > 0);
+				if (!created && !description.empty()) {
+					// Update description on existing row (upsert-like).
+					db->Execute(
+						"UPDATE modules SET description = :description, "
+						"       display_order = :display_order, "
+						"       updated_at = datetime('now') "
+						"WHERE name = :name", p);
+				}
+
+				json resp;
+				resp["success"] = true;
+				resp["name"] = name;
+				resp["created"] = created;
+				resp["message"] = created
+					? std::string("Module created: ") + name
+					: std::string("Module already exists: ") + name;
+				return TMcpToolResult::Success(resp);
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 42. update_module — change description/display_order
+	//=======================================================================
+	tools.push_back({
+		"update_module",
+		"Update metadata of an existing module (description, display_order). "
+		"Does NOT change the module name - use rename_module for that.",
+		TMcpToolSchema()
+			.AddString("name", "Module name", true)
+			.AddString("description", "New description (optional)")
+			.AddInteger("display_order", "New sort order (optional)"),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			std::string name = GetStr(args, "name");
+			if (name.empty())
+				return TMcpToolResult::Error("Missing required parameter: name");
+
+			bool hasDesc = args.contains("description") && !args["description"].is_null();
+			bool hasOrder = args.contains("display_order") && !args["display_order"].is_null();
+			if (!hasDesc && !hasOrder)
+				return TMcpToolResult::Error(
+					"At least one of description or display_order must be provided");
+
+			try {
+				json existing = db->Query(
+					"SELECT name FROM modules WHERE name = :name",
+					Params{{"name", name}});
+				if (existing.empty())
+					return TMcpToolResult::Error("Module does not exist: " + name);
+
+				std::string sql = "UPDATE modules SET updated_at = datetime('now')";
+				Params p;
+				p["name"] = name;
+				if (hasDesc) {
+					sql += ", description = :description";
+					p["description"] = GetStr(args, "description");
+				}
+				if (hasOrder) {
+					sql += ", display_order = :display_order";
+					p["display_order"] = std::to_string(GetInt(args, "display_order", 0));
+				}
+				sql += " WHERE name = :name";
+
+				db->Execute(sql, p);
+
+				json resp;
+				resp["success"] = true;
+				resp["name"] = name;
+				resp["updated"] = true;
+				return TMcpToolResult::Success(resp);
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 43. delete_module — DELETE FROM modules (CASCADE to entity_modules)
+	//=======================================================================
+	tools.push_back({
+		"delete_module",
+		"Delete a module completely. ON DELETE CASCADE removes all entity "
+		"links in entity_modules automatically. Writes audit_log entry. "
+		"To keep the module but drop its links, use clear_module instead.",
+		TMcpToolSchema()
+			.AddString("module_name", "Module name to delete", true),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			std::string name = GetStr(args, "module_name");
+			if (name.empty())
+				return TMcpToolResult::Error("Missing required parameter: module_name");
+
+			try {
+				// Capture state for audit + diff
+				json existing = db->Query(
+					"SELECT name, description, display_order FROM modules WHERE name = :name",
+					Params{{"name", name}});
+				if (existing.empty())
+					return TMcpToolResult::Error("Module does not exist: " + name);
+
+				json linkedEntities = db->Query(
+					"SELECT entity FROM entity_modules WHERE module_name = :name ORDER BY entity",
+					Params{{"name", name}});
+				int linkCount = static_cast<int>(linkedEntities.size());
+
+				db->Execute(
+					"DELETE FROM modules WHERE name = :name",
+					Params{{"name", name}});
+
+				json params;
+				params["module_name"] = name;
+				json diff;
+				diff["deleted_module"] = existing[0];
+				diff["cascade_removed_links"] = linkCount;
+				diff["affected_entities"] = linkedEntities;
+				long long auditId = WriteAudit(db, "delete_module", name, "delete", params, diff);
+
+				json resp;
+				resp["success"] = true;
+				resp["module_name"] = name;
+				resp["deleted_entity_links"] = linkCount;
+				resp["audit_id"] = auditId;
+				return TMcpToolResult::Success(resp);
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 44. rename_module — UPDATE modules (FK CASCADE into entity_modules)
+	//=======================================================================
+	tools.push_back({
+		"rename_module",
+		"Rename a module. ON UPDATE CASCADE propagates to entity_modules. "
+		"Fails if new_name already exists (use bulk_reassign_module + "
+		"delete_module for merge). Writes audit_log entry.",
+		TMcpToolSchema()
+			.AddString("old_name", "Current module name", true)
+			.AddString("new_name", "New module name", true),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			std::string oldName = GetStr(args, "old_name");
+			std::string newName = GetStr(args, "new_name");
+			if (oldName.empty() || newName.empty())
+				return TMcpToolResult::Error("Missing required parameters: old_name, new_name");
+			if (oldName == newName)
+				return TMcpToolResult::Error("old_name and new_name are identical");
+
+			try {
+				json src = db->Query(
+					"SELECT name FROM modules WHERE name = :name",
+					Params{{"name", oldName}});
+				if (src.empty())
+					return TMcpToolResult::Error("Source module does not exist: " + oldName);
+
+				json conflict = db->Query(
+					"SELECT name FROM modules WHERE name = :name",
+					Params{{"name", newName}});
+				if (!conflict.empty())
+					return TMcpToolResult::Error(
+						"Target module already exists: " + newName +
+						". Use bulk_reassign_module + delete_module to merge.");
+
+				Params p;
+				p["old_name"] = oldName;
+				p["new_name"] = newName;
+				db->Execute(
+					"UPDATE modules SET name = :new_name, updated_at = datetime('now') "
+					"WHERE name = :old_name", p);
+
+				int linkCount = 0;
+				try {
+					json cnt = db->Query(
+						"SELECT COUNT(*) AS c FROM entity_modules WHERE module_name = :name",
+						Params{{"name", newName}});
+					if (!cnt.empty())
+						linkCount = static_cast<int>(cnt[0].value("c", (long long)0));
+				} catch (...) {}
+
+				json params;
+				params["old_name"] = oldName;
+				params["new_name"] = newName;
+				json diff;
+				diff["renamed_from"] = oldName;
+				diff["renamed_to"] = newName;
+				diff["cascaded_links"] = linkCount;
+				long long auditId = WriteAudit(db, "rename_module", newName, "rename", params, diff);
+
+				json resp;
+				resp["success"] = true;
+				resp["old_name"] = oldName;
+				resp["new_name"] = newName;
+				resp["cascaded_links"] = linkCount;
+				resp["audit_id"] = auditId;
+				return TMcpToolResult::Success(resp);
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 45. clear_module — drop entity links, keep module record
+	//=======================================================================
+	tools.push_back({
+		"clear_module",
+		"Remove ALL entity links from a module. The module itself stays. "
+		"To delete the module completely, use delete_module. "
+		"Writes audit_log entry.",
+		TMcpToolSchema()
+			.AddString("module_name", "Module name", true),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			std::string name = GetStr(args, "module_name");
+			if (name.empty())
+				return TMcpToolResult::Error("Missing required parameter: module_name");
+
+			try {
+				json entities = db->Query(
+					"SELECT entity FROM entity_modules WHERE module_name = :name ORDER BY entity",
+					Params{{"name", name}});
+				int n = db->Execute(
+					"DELETE FROM entity_modules WHERE module_name = :name",
+					Params{{"name", name}});
+
+				json params;
+				params["module_name"] = name;
+				json diff;
+				diff["removed_links"] = n;
+				diff["affected_entities"] = entities;
+				long long auditId = WriteAudit(db, "clear_module", name, "clear", params, diff);
+
+				json resp;
+				resp["success"] = true;
+				resp["module_name"] = name;
+				resp["deleted_links"] = n;
+				resp["audit_id"] = auditId;
+				return TMcpToolResult::Success(resp);
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 46. unlink_entity_from_module — remove a single entity↔module link
+	//=======================================================================
+	tools.push_back({
+		"unlink_entity_from_module",
+		"Remove a single entity↔module link. "
+		"Does not delete the entity or the module themselves.",
+		TMcpToolSchema()
+			.AddString("entity", "Entity name", true)
+			.AddString("module_name", "Module name", true),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			std::string entity = GetStr(args, "entity");
+			std::string moduleName = GetStr(args, "module_name");
+			if (entity.empty() || moduleName.empty())
+				return TMcpToolResult::Error(
+					"Missing required parameters: entity, module_name");
+
+			try {
+				Params p;
+				p["entity"] = entity;
+				p["module_name"] = moduleName;
+				int n = db->Execute(
+					"DELETE FROM entity_modules "
+					"WHERE entity = :entity AND module_name = :module_name", p);
+
+				json resp;
+				resp["success"] = true;
+				resp["entity"] = entity;
+				resp["module_name"] = moduleName;
+				resp["deleted"] = n;
+				return TMcpToolResult::Success(resp);
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 47. bulk_reassign_module — move all entities from one module to another
+	//=======================================================================
+	tools.push_back({
+		"bulk_reassign_module",
+		"Atomically move all entity links from from_module into to_module. "
+		"INSERT OR IGNORE for UNIQUE(module_name, entity) collisions, then "
+		"DELETE source rows.  Both modules remain (use delete_module on "
+		"from_module afterwards to complete merge).  Writes audit_log.",
+		TMcpToolSchema()
+			.AddString("from_module", "Source module (entities moved away)", true)
+			.AddString("to_module", "Target module (entities moved into)", true),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			std::string fromModule = GetStr(args, "from_module");
+			std::string toModule = GetStr(args, "to_module");
+			if (fromModule.empty() || toModule.empty())
+				return TMcpToolResult::Error(
+					"Missing required parameters: from_module, to_module");
+			if (fromModule == toModule)
+				return TMcpToolResult::Error("from_module and to_module are identical");
+
+			try {
+				// Ensure target module exists in modules table (FK requirement).
+				db->Execute(
+					"INSERT OR IGNORE INTO modules (name) VALUES (:name)",
+					Params{{"name", toModule}});
+
+				db->BeginTransaction();
+				try {
+					json srcRows = db->Query(
+						"SELECT entity FROM entity_modules WHERE module_name = :name ORDER BY entity",
+						Params{{"name", fromModule}});
+					int srcCount = static_cast<int>(srcRows.size());
+
+					json existingTarget = db->Query(
+						"SELECT entity FROM entity_modules WHERE module_name = :name",
+						Params{{"name", toModule}});
+					std::set<std::string> targetSet;
+					for (const auto &r : existingTarget)
+						targetSet.insert(r.value("entity", std::string()));
+
+					int moved = 0, skipped = 0;
+					for (const auto &r : srcRows) {
+						std::string ent = r.value("entity", std::string());
+						if (ent.empty()) continue;
+						Params ip;
+						ip["module_name"] = toModule;
+						ip["entity"] = ent;
+						int n = db->Execute(
+							"INSERT OR IGNORE INTO entity_modules (module_name, entity) "
+							"VALUES (:module_name, :entity)", ip);
+						if (n > 0) moved++; else skipped++;
+					}
+
+					int deleted = db->Execute(
+						"DELETE FROM entity_modules WHERE module_name = :name",
+						Params{{"name", fromModule}});
+
+					db->Commit();
+
+					json params;
+					params["from_module"] = fromModule;
+					params["to_module"] = toModule;
+					json diff;
+					diff["source_count"] = srcCount;
+					diff["moved"] = moved;
+					diff["duplicates_skipped"] = skipped;
+					diff["deleted_from_source"] = deleted;
+					long long auditId = WriteAudit(db, "bulk_reassign_module",
+						fromModule + "->" + toModule, "reassign", params, diff);
+
+					json resp;
+					resp["success"] = true;
+					resp["from_module"] = fromModule;
+					resp["to_module"] = toModule;
+					resp["moved"] = moved;
+					resp["duplicates_skipped"] = skipped;
+					resp["deleted_from_source"] = deleted;
+					resp["audit_id"] = auditId;
+					return TMcpToolResult::Success(resp);
+				} catch (...) {
+					try { db->Rollback(); } catch (...) {}
+					throw;
+				}
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 48. detect_duplicates — fuzzy groups by Jaccard token similarity
+	//=======================================================================
+	tools.push_back({
+		"detect_duplicates",
+		"Find fuzzy-matched groups of similar names (entities, modules or "
+		"glossary terms) via Jaccard similarity on tokenized names. "
+		"Never merges automatically - purely a detector. Use output to "
+		"inform manual merge decisions.",
+		TMcpToolSchema()
+			.AddString("scope", "Scope: entities (default) | modules | glossary_terms")
+			.AddString("threshold", "Jaccard threshold 0..1 (default 0.75)"),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			std::string scope = GetStr(args, "scope", "entities");
+			double threshold = 0.75;
+			{
+				std::string tstr = GetStr(args, "threshold");
+				if (!tstr.empty()) {
+					try { threshold = std::stod(tstr); } catch (...) {}
+				} else if (args.contains("threshold") && args["threshold"].is_number()) {
+					threshold = args["threshold"].get<double>();
+				}
+			}
+			if (threshold < 0.0 || threshold > 1.0)
+				return TMcpToolResult::Error("threshold must be in [0.0 .. 1.0]");
+
+			try {
+				std::vector<std::string> names;
+				if (scope == "entities") {
+					json rows = db->Query(
+						"SELECT DISTINCT entity AS name FROM ("
+						"  SELECT entity FROM facts "
+						"  UNION SELECT entity FROM entity_status "
+						"  UNION SELECT entity FROM entity_modules "
+						"  UNION SELECT entity_from AS entity FROM relationships "
+						"  UNION SELECT entity_to AS entity FROM relationships "
+						"  UNION SELECT entity FROM glossary WHERE entity <> ''"
+						") WHERE name <> '' ORDER BY name", {});
+					for (const auto &r : rows)
+						names.push_back(r.value("name", std::string()));
+				} else if (scope == "modules") {
+					json rows = db->Query(
+						"SELECT name FROM modules "
+						"UNION SELECT DISTINCT module_name AS name FROM entity_modules "
+						"ORDER BY name", {});
+					for (const auto &r : rows)
+						names.push_back(r.value("name", std::string()));
+				} else if (scope == "glossary_terms") {
+					json rows = db->Query(
+						"SELECT term AS name FROM glossary ORDER BY term", {});
+					for (const auto &r : rows)
+						names.push_back(r.value("name", std::string()));
+				} else {
+					return TMcpToolResult::Error(
+						"Invalid scope: must be entities | modules | glossary_terms");
+				}
+
+				// Tokenize once per name.
+				std::vector<std::vector<std::string>> tokens(names.size());
+				for (size_t i = 0; i < names.size(); i++)
+					tokens[i] = TokenizeIdentifier(names[i]);
+
+				// Union-find: assign each name to a group id.
+				std::vector<int> groupOf(names.size(), -1);
+				int nextGroup = 0;
+				for (size_t i = 0; i < names.size(); i++) {
+					if (groupOf[i] != -1) continue;
+					int gid = -1;
+					for (size_t j = 0; j < i; j++) {
+						if (groupOf[j] == -1) continue;
+						double sim = JaccardSimilarity(tokens[i], tokens[j]);
+						if (sim >= threshold) {
+							gid = groupOf[j];
+							break;
+						}
+					}
+					if (gid == -1) gid = nextGroup++;
+					groupOf[i] = gid;
+				}
+
+				// Collect groups with size >= 2.
+				std::map<int, std::vector<std::string>> groupMap;
+				for (size_t i = 0; i < names.size(); i++)
+					groupMap[groupOf[i]].push_back(names[i]);
+
+				json groups = json::array();
+				for (auto &kv : groupMap) {
+					if (kv.second.size() < 2) continue;
+					groups.push_back(kv.second);
+				}
+
+				json resp;
+				resp["scope"] = scope;
+				resp["threshold"] = threshold;
+				resp["method"] = "jaccard_tokens";
+				resp["groups"] = groups;
+				resp["group_count"] = groups.size();
+				resp["total_names_checked"] = names.size();
+				return TMcpToolResult::Success(resp);
+			} catch (const std::exception &e) {
+				return TMcpToolResult::Error(e.what());
+			}
+		}
+	});
+
+	//=======================================================================
+	// 49. detect_orphans — entities mentioned in data, without status/module
+	//=======================================================================
+	tools.push_back({
+		"detect_orphans",
+		"Find entities that appear in facts/relationships/glossary but have "
+		"NO entity_status AND NO entity_modules rows. These are candidates "
+		"for deletion or classification. Returns counts per source table.",
+		TMcpToolSchema(),
+		[db](const json &args, TMcpToolContext &ctx) -> TMcpToolResult {
+			try {
+				json rows = db->Query(
+					"SELECT e.entity, "
+					"  (SELECT COUNT(*) FROM facts WHERE entity = e.entity) AS fact_count, "
+					"  (SELECT COUNT(*) FROM relationships "
+					"     WHERE entity_from = e.entity OR entity_to = e.entity) AS rel_count, "
+					"  (SELECT COUNT(*) FROM glossary WHERE entity = e.entity) AS glossary_count "
+					"FROM ("
+					"  SELECT DISTINCT entity FROM facts WHERE entity <> '' "
+					"  UNION SELECT DISTINCT entity_from AS entity FROM relationships WHERE entity_from <> '' "
+					"  UNION SELECT DISTINCT entity_to   AS entity FROM relationships WHERE entity_to <> '' "
+					"  UNION SELECT DISTINCT entity FROM glossary WHERE entity <> '' "
+					") e "
+					"WHERE NOT EXISTS (SELECT 1 FROM entity_status  s WHERE s.entity = e.entity) "
+					"  AND NOT EXISTS (SELECT 1 FROM entity_modules m WHERE m.entity = e.entity) "
+					"ORDER BY fact_count DESC, rel_count DESC, e.entity", {});
+
+				json resp;
+				resp["orphans"] = rows;
+				resp["total"] = rows.size();
 				return TMcpToolResult::Success(resp);
 			} catch (const std::exception &e) {
 				return TMcpToolResult::Error(e.what());

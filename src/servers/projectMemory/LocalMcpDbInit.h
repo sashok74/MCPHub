@@ -263,7 +263,21 @@ inline void InitializeProjectMemorySchema(LocalMcpDb *db)
 		"CREATE INDEX IF NOT EXISTS idx_rel_type ON relationships(rel_type);"
 	);
 
-	// Entity modules
+	// Modules table — canonical list of modules with metadata.
+	// entity_modules.module_name → FK to modules.name (ON UPDATE/DELETE CASCADE).
+	db->Exec(
+		"CREATE TABLE IF NOT EXISTS modules ("
+		"  name TEXT PRIMARY KEY,"
+		"  description TEXT DEFAULT '',"
+		"  display_order INTEGER DEFAULT 0,"
+		"  created_at TEXT DEFAULT (datetime('now')),"
+		"  updated_at TEXT DEFAULT (datetime('now'))"
+		");"
+	);
+
+	// Entity modules — legacy schema without FK. Fresh installs start with
+	// this base shape. Existing DBs get upgraded in-place by the migration
+	// block below (entity_modules is rebuilt with FK to modules.name).
 	db->Exec(
 		"CREATE TABLE IF NOT EXISTS entity_modules ("
 		"  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -274,6 +288,23 @@ inline void InitializeProjectMemorySchema(LocalMcpDb *db)
 		");"
 		"CREATE INDEX IF NOT EXISTS idx_em_module ON entity_modules(module_name);"
 		"CREATE INDEX IF NOT EXISTS idx_em_entity ON entity_modules(entity);"
+	);
+
+	// Audit log — trace of destructive operations (delete/merge/rename).
+	// Written from delete_* / merge_* / rename_* handlers via WriteAudit().
+	db->Exec(
+		"CREATE TABLE IF NOT EXISTS audit_log ("
+		"  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+		"  tool_name TEXT NOT NULL,"
+		"  entity_ref TEXT,"
+		"  action TEXT NOT NULL,"
+		"  params_json TEXT,"
+		"  result_diff TEXT,"
+		"  created_at TEXT DEFAULT (datetime('now'))"
+		");"
+		"CREATE INDEX IF NOT EXISTS idx_audit_tool ON audit_log(tool_name);"
+		"CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_ref);"
+		"CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);"
 	);
 
 	// Entity status
@@ -498,29 +529,110 @@ inline void InitializeProjectMemorySchema(LocalMcpDb *db)
 	// Schema migrations — add missing columns to tables created by older
 	// versions.  ALTER TABLE ADD COLUMN is a no-op (caught by try/catch)
 	// when the column already exists.
+	//
+	// NOTE: SQLite disallows non-constant DEFAULT (e.g. datetime('now'))
+	// in ALTER TABLE ADD COLUMN.  So we add without DEFAULT and backfill
+	// existing rows via UPDATE.  New INSERTs set timestamps explicitly.
+	// (Fresh tables created via CREATE TABLE keep their DEFAULT clause.)
 	// ===================================================================
-	auto SafeAddColumn = [db](const char *ddl) {
+	auto SafeExec = [db](const char *ddl) {
 		try { db->Exec(ddl); } catch (...) {}
 	};
 
-	// verified_queries: renamed verified_at → updated_at
-	SafeAddColumn("ALTER TABLE verified_queries ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))");
-	SafeAddColumn("ALTER TABLE verified_queries ADD COLUMN created_at TEXT DEFAULT (datetime('now'))");
+	// verified_queries: renamed verified_at → updated_at (migration from legacy)
+	SafeExec("ALTER TABLE verified_queries ADD COLUMN updated_at TEXT");
+	SafeExec("ALTER TABLE verified_queries ADD COLUMN created_at TEXT");
+	SafeExec("UPDATE verified_queries SET updated_at = COALESCE(verified_at, datetime('now')) WHERE updated_at IS NULL");
+	SafeExec("UPDATE verified_queries SET created_at = COALESCE(verified_at, datetime('now')) WHERE created_at IS NULL");
 
 	// form_table_map
-	SafeAddColumn("ALTER TABLE form_table_map ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))");
+	SafeExec("ALTER TABLE form_table_map ADD COLUMN updated_at TEXT");
+	SafeExec("UPDATE form_table_map SET updated_at = COALESCE(created_at, datetime('now')) WHERE updated_at IS NULL");
 
 	// glossary
-	SafeAddColumn("ALTER TABLE glossary ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))");
+	SafeExec("ALTER TABLE glossary ADD COLUMN updated_at TEXT");
+	SafeExec("UPDATE glossary SET updated_at = COALESCE(created_at, datetime('now')) WHERE updated_at IS NULL");
 
 	// code_patterns
-	SafeAddColumn("ALTER TABLE code_patterns ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))");
+	SafeExec("ALTER TABLE code_patterns ADD COLUMN updated_at TEXT");
+	SafeExec("UPDATE code_patterns SET updated_at = COALESCE(created_at, datetime('now')) WHERE updated_at IS NULL");
 
 	// feature_requests
-	SafeAddColumn("ALTER TABLE feature_requests ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))");
+	SafeExec("ALTER TABLE feature_requests ADD COLUMN updated_at TEXT");
+	SafeExec("UPDATE feature_requests SET updated_at = COALESCE(created_at, datetime('now')) WHERE updated_at IS NULL");
 
 	// relationships
-	SafeAddColumn("ALTER TABLE relationships ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))");
+	SafeExec("ALTER TABLE relationships ADD COLUMN updated_at TEXT");
+	SafeExec("UPDATE relationships SET updated_at = COALESCE(created_at, datetime('now')) WHERE updated_at IS NULL");
+
+	// ===================================================================
+	// entity_modules → FK migration (idempotent).
+	// Legacy entity_modules has no FK to modules.  Rebuild it with
+	// FOREIGN KEY(module_name) REFERENCES modules(name) ON UPDATE/DELETE
+	// CASCADE so that rename_module / delete_module can use SQL cascade.
+	//
+	// Steps:
+	//   1. Populate modules table with DISTINCT module_name's from
+	//      existing entity_modules rows (skips those already present).
+	//   2. Check if entity_modules already has FK via PRAGMA.  If yes —
+	//      migration is already done, skip.
+	//   3. Rebuild entity_modules: rename old → _old, create new with FK,
+	//      copy rows (INSERT OR IGNORE — deduplicates stale conflicts),
+	//      drop _old, recreate indexes.
+	// ===================================================================
+	try {
+		// Step 1: seed modules from current distinct module_name
+		db->Exec(
+			"INSERT OR IGNORE INTO modules(name) "
+			"SELECT DISTINCT module_name FROM entity_modules"
+		);
+
+		// Step 2: does entity_modules already have FK?
+		LocalMcpDb::json fkList = db->Query(
+			"SELECT \"table\" FROM pragma_foreign_key_list('entity_modules')", {});
+		bool hasFk = !fkList.empty();
+
+		if (!hasFk) {
+			// Step 3: rebuild with FK.  foreign_keys must be OFF during rename.
+			db->Exec("PRAGMA foreign_keys=OFF");
+			db->Exec("BEGIN TRANSACTION");
+			try {
+				db->Exec("ALTER TABLE entity_modules RENAME TO entity_modules_old");
+				db->Exec(
+					"CREATE TABLE entity_modules ("
+					"  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+					"  module_name TEXT NOT NULL,"
+					"  entity TEXT NOT NULL,"
+					"  created_at TEXT DEFAULT (datetime('now')),"
+					"  UNIQUE(module_name, entity),"
+					"  FOREIGN KEY(module_name) REFERENCES modules(name) "
+					"    ON UPDATE CASCADE ON DELETE CASCADE"
+					")"
+				);
+				db->Exec(
+					"INSERT OR IGNORE INTO entity_modules(id, module_name, entity, created_at) "
+					"SELECT id, module_name, entity, created_at FROM entity_modules_old"
+				);
+				db->Exec("DROP TABLE entity_modules_old");
+				db->Exec(
+					"CREATE INDEX IF NOT EXISTS idx_em_module ON entity_modules(module_name)"
+				);
+				db->Exec(
+					"CREATE INDEX IF NOT EXISTS idx_em_entity ON entity_modules(entity)"
+				);
+				db->Exec("COMMIT");
+			} catch (...) {
+				try { db->Exec("ROLLBACK"); } catch (...) {}
+				try { db->Exec("PRAGMA foreign_keys=ON"); } catch (...) {}
+				throw;
+			}
+			db->Exec("PRAGMA foreign_keys=ON");
+		}
+	} catch (...) {
+		// Migration failures are fatal only for this block — schema
+		// creation above is already done.  Re-throw so operators see it.
+		throw;
+	}
 }
 
 #endif

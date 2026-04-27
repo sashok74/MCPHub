@@ -107,6 +107,7 @@ __published:
 	TButton *btnAdd;
 	TPopupMenu *pmAddModule;
 	TButton *btnSaveConfig;
+	TButton *btnMcpJson;
 	TButton *btnStartAll;
 	TButton *btnStopAll;
 
@@ -134,6 +135,7 @@ __published:
 	void __fastcall btnSaveConfigClick(TObject *Sender);
 	void __fastcall btnStartAllClick(TObject *Sender);
 	void __fastcall btnStopAllClick(TObject *Sender);
+	void __fastcall btnMcpJsonClick(TObject *Sender);
 	void __fastcall pcDetailsChange(TObject *Sender);
 	void __fastcall pmAddModuleItemClick(TObject *Sender);
 

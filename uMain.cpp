@@ -8,6 +8,7 @@
 #include "TransportTypes.h"
 #include <System.SysUtils.hpp>
 #include <System.JSON.hpp>
+#include <Vcl.Clipbrd.hpp>
 #include <algorithm>
 #include <ctime>
 #include <map>
@@ -794,6 +795,60 @@ void TfrmMain::UpdateStatusBar()
 	StatusBar->Panels->Items[1]->Text = IntToStr(running) + L" running";
 	StatusBar->Panels->Items[2]->Text = L"Reqs: " + IntToStr(totalReqs);
 	StatusBar->Panels->Items[3]->Text = u("Ports: " + (ports.empty() ? "none" : ports));
+}
+
+//---------------------------------------------------------------------------
+// Generate mcp.json snippet for checked modules
+//---------------------------------------------------------------------------
+static std::string MakeJsonKey(const std::string& displayName)
+{
+	std::string key;
+	for (char c : displayName)
+	{
+		if (c == ' ' || c == '\t')
+			key += '-';
+		else if (c == '(' || c == ')' || c == '[' || c == ']')
+			continue;
+		else
+			key += (char)std::tolower((unsigned char)c);
+	}
+	// trim trailing dashes
+	while (!key.empty() && key.back() == '-')
+		key.pop_back();
+	return key;
+}
+
+void __fastcall TfrmMain::btnMcpJsonClick(TObject *Sender)
+{
+	nlohmann::json servers = nlohmann::json::object();
+
+	for (int i = 0; i < lvModules->Items->Count; i++)
+	{
+		if (lvModules->Items->Item[i]->Checked)
+		{
+			auto* m = FModules[i].get();
+			std::string key = MakeJsonKey(m->GetDisplayName());
+			wchar_t compName[MAX_COMPUTERNAME_LENGTH + 1];
+			DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
+			GetComputerNameW(compName, &size);
+			std::string host = AnsiString(compName).c_str();
+			servers[key]["type"] = "http";
+			servers[key]["url"] = "http://" + host + ":" + std::to_string(m->GetPort()) + "/mcp";
+		}
+	}
+
+	if (servers.empty())
+	{
+		ShowMessage(L"No modules checked. Use checkboxes in the list to select modules.");
+		return;
+	}
+
+	nlohmann::json root;
+	root["mcpServers"] = servers;
+	std::string text = root.dump(2);
+
+	Clipboard()->AsText = u(text);
+	StatusBar->SimpleText = L"mcp.json copied to clipboard (" + IntToStr((int)servers.size()) + L" servers)";
 }
 
 //---------------------------------------------------------------------------

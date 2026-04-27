@@ -11,6 +11,8 @@ __recovery/
 *.tvsconfig
 *.dsk
 *.stat
+*.zip
+*.7z
 
 # Build logs & error reports
 doc/cpp_build/logs/
